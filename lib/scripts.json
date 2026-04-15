@@ -1,0 +1,141 @@
+{
+  "scripts": [
+    {
+      "id": "todo-sync",
+      "name": "Todo Sync",
+      "category": "scheduled",
+      "description": "Synchronize Task Notes with JIRA",
+      "schedule": "8:20 AM weekdays"
+    },
+    {
+      "id": "morning-plan",
+      "name": "Morning Plan",
+      "category": "scheduled",
+      "description": "Generate daily plan from yesterday's log, todos, JIRA, and calendar",
+      "schedule": "8:30 AM weekdays"
+    },
+    {
+      "id": "midday-refresh",
+      "name": "Midday Refresh",
+      "category": "scheduled",
+      "description": "Sync calendar, reschedule tasks into free blocks, update daily note",
+      "schedule": "12:00 PM weekdays"
+    },
+    {
+      "id": "daily-summary",
+      "name": "Daily Summary",
+      "category": "scheduled",
+      "description": "Create end-of-day work summary with git commits, completed todos, meetings",
+      "schedule": "5:30 PM weekdays"
+    },
+    {
+      "id": "daily-context-updater",
+      "name": "Daily Context Updater",
+      "category": "scheduled",
+      "description": "Refresh AI context files in the vault",
+      "schedule": "5:45 PM weekdays"
+    },
+    {
+      "id": "weekly-standup",
+      "name": "Weekly Standup",
+      "category": "scheduled",
+      "description": "Generate weekly standup summary",
+      "schedule": "Mon 9:00 AM"
+    },
+    {
+      "id": "weekly-summary",
+      "name": "Weekly Summary",
+      "category": "scheduled",
+      "description": "Aggregate daily summaries into weekly report",
+      "schedule": "Fri 4:30 PM"
+    },
+    {
+      "id": "weekly-reflection",
+      "name": "Weekly Reflection",
+      "category": "scheduled",
+      "description": "Personal reflection after weekly summary syncs",
+      "schedule": "Fri 5:00 PM"
+    },
+    {
+      "id": "claude-theme-sync",
+      "name": "Theme Sync",
+      "category": "scheduled",
+      "description": "Watch system theme and sync to Claude Code",
+      "schedule": "persistent (run at load)"
+    },
+    {
+      "id": "meeting-start",
+      "name": "Meeting Start",
+      "category": "meeting",
+      "description": "MeetingBar event handler: save metadata and start recording"
+    },
+    {
+      "id": "meeting-stop",
+      "name": "Meeting Stop",
+      "category": "meeting",
+      "description": "Stop recording, resolve meeting name, move audio file"
+    },
+    {
+      "id": "transcribe-and-process",
+      "name": "Transcribe & Process",
+      "category": "meeting",
+      "description": "Whisper transcription, hallucination detection, domain corrections, diarization, meeting note creation"
+    },
+    {
+      "id": "meeting-intelligence",
+      "name": "Meeting Intelligence",
+      "category": "meeting",
+      "description": "AI analysis and summary of meeting transcript"
+    },
+    {
+      "id": "live-transcript",
+      "name": "Live Transcript",
+      "category": "meeting",
+      "description": "Real-time yap transcription during meetings"
+    },
+    {
+      "id": "archive-work-log",
+      "name": "Archive Work Log",
+      "category": "manual",
+      "description": "Move old daily/weekly summaries to quarterly archive folders"
+    },
+    {
+      "id": "process-drafts-inbox",
+      "name": "Process Drafts Inbox",
+      "category": "manual",
+      "description": "Triage Drafts inbox items into Obsidian vault or Apple Reminders"
+    },
+    {
+      "id": "process-reminders-inbox",
+      "name": "Process Reminders Inbox",
+      "category": "manual",
+      "description": "Triage Apple Reminders Inbox items into correct lists or Obsidian"
+    },
+    {
+      "id": "enrich-connections",
+      "name": "Enrich Connections",
+      "category": "manual",
+      "description": "Discover related notes using semantic search and add wikilinks"
+    },
+    {
+      "id": "meeting-tasks-extractor",
+      "name": "Meeting Tasks Extractor",
+      "category": "manual",
+      "description": "Scan recent meeting notes for action items not yet created as Task Notes"
+    }
+  ],
+  "categories": {
+    "scheduled": {
+      "label": "Scheduled",
+      "description": "Launchd agents that run on a timer"
+    },
+    "meeting": {
+      "label": "Meeting Pipeline",
+      "description": "Recording, transcription, and intelligence processing"
+    },
+    "manual": {
+      "label": "On-Demand",
+      "description": "Manually triggered via Claude Code, Raycast, or CLI"
+    }
+  }
+}

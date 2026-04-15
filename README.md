@@ -1,73 +1,74 @@
-# React + TypeScript + Vite
+# Script Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A local web dashboard for monitoring shell script and automation runs on macOS. Click a notification to see what just happened.
 
-Currently, two official plugins are available:
+Built for tracking launchd agents, MeetingBar triggers, and on-demand CLI automations -- but works with any script you can add two lines to.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## How It Works
 
-## React Compiler
+1. **Scripts report** -- Source `lib/report.sh` in your script to write a structured JSON run record
+2. **API serves** -- Express reads the run records directory and serves them
+3. **Dashboard shows** -- React frontend groups runs by category with expandable output
+4. **Notification links** -- `terminal-notifier` sends a macOS notification on completion; click it to open the dashboard
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Quick Start
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+git clone https://github.com/yourname/script-dashboard.git
+cd script-dashboard
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Then integrate a script:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+```bash
+#!/bin/bash
+source /path/to/script-dashboard/lib/report.sh
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+report_start "my-backup" "scheduled"
+
+# your script logic here
+rsync -a ~/Documents /Volumes/Backup/
+
+report_end $?
 ```
+
+Or wrap an existing command:
+
+```bash
+source /path/to/script-dashboard/lib/report.sh
+report_exec "my-backup" "scheduled" "Nightly backup" -- rsync -a ~/Documents /Volumes/Backup/
+```
+
+## Configuration
+
+Copy `lib/config.example.sh` to `~/.config/script-dashboard/config.sh`:
+
+```bash
+# Where run records are stored
+SCRIPT_RUNS_DIR="$HOME/.script-runs/runs"
+
+# Dashboard URL for notification click-through
+SCRIPT_DASH_URL="http://localhost:7890"
+
+# Browser to open (leave empty for system default)
+SCRIPT_DASH_BROWSER="Google Chrome"
+
+# Set to "0" to disable notifications
+SCRIPT_DASH_NOTIFY="1"
+```
+
+## Requirements
+
+- Node.js 18+
+- macOS (for `terminal-notifier` notifications; the dashboard itself works anywhere)
+- `brew install terminal-notifier` (optional, falls back to `osascript`)
+
+## Stack
+
+React, TypeScript, Vite, Tailwind CSS v4, shadcn/ui, Express
+
+## License
+
+MIT
