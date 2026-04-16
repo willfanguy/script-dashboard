@@ -4,7 +4,8 @@ import { Badge } from "@/components/ui/badge";
 import { RefreshCw } from "lucide-react";
 
 function App() {
-  const { runs, registry, loading, error, refresh, fetchRunDetail } = useRuns();
+  const { runs, registry, loading, error, connected, refresh, fetchRunDetail } =
+    useRuns();
 
   const runningCount = runs.filter((r) => r.status === "running").length;
   const failedRecent = runs
@@ -17,6 +18,10 @@ function App() {
         <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-semibold">Script Dashboard</h1>
+            <span
+              className={`inline-block h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-muted-foreground/30"}`}
+              title={connected ? "Live — updates automatically" : "Disconnected — using manual refresh"}
+            />
             {runningCount > 0 && (
               <Badge variant="default" className="text-xs">
                 {runningCount} running

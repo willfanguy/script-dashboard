@@ -3,6 +3,10 @@ import cors from "cors";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "7890", 10);
@@ -142,7 +146,50 @@ app.post("/api/runs/cleanup", (req, res) => {
   res.json({ deleted, cutoffDays: days });
 });
 
+// --- Server-Sent Events for live updates ---
+
+const sseClients = new Set<import("express").Response>();
+
+app.get("/api/events", (_req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+  res.write(":\n\n"); // SSE comment to establish connection
+
+  sseClients.add(res);
+  _req.on("close", () => sseClients.delete(res));
+});
+
+function broadcastUpdate() {
+  const data = JSON.stringify({ type: "update", timestamp: Date.now() });
+  for (const client of sseClients) {
+    client.write(`data: ${data}\n\n`);
+  }
+}
+
+// Watch the runs directory for changes
+if (!fs.existsSync(RUNS_DIR)) {
+  fs.mkdirSync(RUNS_DIR, { recursive: true });
+}
+
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+fs.watch(RUNS_DIR, (_eventType, filename) => {
+  // Only react to JSON file changes (ignore .output and .tmp files)
+  if (!filename?.endsWith(".json")) return;
+
+  // Debounce: report.sh writes a .tmp then renames, so we may get
+  // multiple events in quick succession for a single logical update
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    broadcastUpdate();
+    debounceTimer = null;
+  }, 300);
+});
+
 app.listen(PORT, () => {
   console.log(`Script Dashboard API running on http://localhost:${PORT}`);
   console.log(`Reading runs from: ${RUNS_DIR}`);
+  console.log(`SSE endpoint: http://localhost:${PORT}/api/events`);
 });

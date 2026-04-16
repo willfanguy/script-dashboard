@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { RunRecord, ScriptRegistry } from "@/types";
 
 export function useRuns() {
@@ -6,6 +6,8 @@ export function useRuns() {
   const [registry, setRegistry] = useState<ScriptRegistry | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [connected, setConnected] = useState(false);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   const fetchRuns = useCallback(async () => {
     try {
@@ -32,20 +34,52 @@ export function useRuns() {
     }
   }, []);
 
-  const fetchRunDetail = useCallback(async (id: string): Promise<RunRecord | null> => {
-    try {
-      const res = await fetch(`/api/runs/${encodeURIComponent(id)}`);
-      if (!res.ok) return null;
-      return await res.json();
-    } catch {
-      return null;
-    }
-  }, []);
+  const fetchRunDetail = useCallback(
+    async (id: string): Promise<RunRecord | null> => {
+      try {
+        const res = await fetch(`/api/runs/${encodeURIComponent(id)}`);
+        if (!res.ok) return null;
+        return await res.json();
+      } catch {
+        return null;
+      }
+    },
+    []
+  );
 
+  // Subscribe to SSE for live updates
   useEffect(() => {
     fetchRuns();
     fetchRegistry();
+
+    const es = new EventSource("/api/events");
+    eventSourceRef.current = es;
+
+    es.onopen = () => setConnected(true);
+
+    es.onmessage = () => {
+      // Server pushed an update — re-fetch the runs list
+      fetchRuns();
+    };
+
+    es.onerror = () => {
+      setConnected(false);
+      // EventSource auto-reconnects, so no manual retry needed
+    };
+
+    return () => {
+      es.close();
+      eventSourceRef.current = null;
+    };
   }, [fetchRuns, fetchRegistry]);
 
-  return { runs, registry, loading, error, refresh: fetchRuns, fetchRunDetail };
+  return {
+    runs,
+    registry,
+    loading,
+    error,
+    connected,
+    refresh: fetchRuns,
+    fetchRunDetail,
+  };
 }
