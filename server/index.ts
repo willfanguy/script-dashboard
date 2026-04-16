@@ -69,7 +69,7 @@ app.get("/api/runs", (_req, res) => {
   }
 
   // Strip output from list view to keep the response lean
-  const summary = runs.slice(0, limit).map(({ output, ...rest }) => rest);
+  const summary = runs.slice(0, limit).map(({ output: _output, ...rest }) => rest);
   res.json(summary);
 });
 

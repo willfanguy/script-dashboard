@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { groupByCategory } from "@/components/RunList";
+import { groupByCategory } from "@/utils/groupByCategory";
 import type { RunRecord, ScriptRegistry } from "@/types";
 
 function makeRun(overrides: Partial<RunRecord> = {}): RunRecord {
