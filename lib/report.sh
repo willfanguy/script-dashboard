@@ -210,6 +210,10 @@ ENDJSON
 
     # Clean up output capture file (content is in the JSON now)
     rm -f "$_SD_OUTPUT_FILE"
+
+    # Clear state so the EXIT trap doesn't re-fire
+    _SD_RUN_FILE=""
+    _SD_OUTPUT_FILE=""
 }
 
 # report_exec SCRIPT_NAME CATEGORY [DESCRIPTION] -- COMMAND [ARGS...]

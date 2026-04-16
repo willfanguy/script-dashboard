@@ -122,6 +122,42 @@
       "name": "Meeting Tasks Extractor",
       "category": "manual",
       "description": "Scan recent meeting notes for action items not yet created as Task Notes"
+    },
+    {
+      "id": "main-sync",
+      "name": "Main Sync",
+      "category": "skill",
+      "description": "Pull latest from main and summarize changes"
+    },
+    {
+      "id": "refresh-schedule",
+      "name": "Refresh Schedule",
+      "category": "skill",
+      "description": "Sync calendar, reschedule tasks, update daily note and plan"
+    },
+    {
+      "id": "commit-push-mr",
+      "name": "Commit Push MR",
+      "category": "skill",
+      "description": "Commit, push, and open a GitLab MR"
+    },
+    {
+      "id": "commit-push-pr",
+      "name": "Commit Push PR",
+      "category": "skill",
+      "description": "Commit, push, and open a GitHub PR"
+    },
+    {
+      "id": "start-task",
+      "name": "Start Task",
+      "category": "skill",
+      "description": "Load context and begin working on an Obsidian Task Note"
+    },
+    {
+      "id": "end-task",
+      "name": "End Task",
+      "category": "skill",
+      "description": "Update Task Note with status and work log"
     }
   ],
   "categories": {
@@ -136,6 +172,10 @@
     "manual": {
       "label": "On-Demand",
       "description": "Manually triggered via Claude Code, Raycast, or CLI"
+    },
+    "skill": {
+      "label": "Slash Commands",
+      "description": "Claude Code skills and slash commands"
     }
   }
 }
