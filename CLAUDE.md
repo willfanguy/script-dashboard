@@ -15,6 +15,29 @@ npm run build        # Build frontend
 npm start            # Start API server (serves from dist/)
 ```
 
+## Testing
+
+```bash
+npm test             # Run tests once
+npm run test:watch   # Watch mode
+```
+
+- **Framework**: Vitest
+- **Test location**: `src/__tests__/`
+- **Extracted utilities**: `src/utils/formatting.ts` (pure functions extracted from RunCard.tsx for testability)
+- **Policy**: Follows workspace-level Testing Standards
+
+### Test coverage
+
+- `formatting.ts` — formatDuration, statusVariant, timeAgo, formatDate (all with frozen timers)
+- `RunList.tsx` — groupByCategory ordering, registry respect, unknown categories, empty input
+
+### Not yet tested
+
+- `server/index.ts` — readRunFiles, Express endpoints, cleanup logic
+- SSE event streaming
+- `use-runs.ts` hook
+
 ## Architecture
 
 ```

@@ -8,7 +8,7 @@ interface RunListProps {
   onExpand: (id: string) => Promise<RunRecord | null>;
 }
 
-function groupByCategory(
+export function groupByCategory(
   runs: RunRecord[],
   registry: ScriptRegistry | null
 ): Map<string, RunRecord[]> {
