@@ -124,6 +124,30 @@
       "description": "Scan recent meeting notes for action items not yet created as Task Notes"
     },
     {
+      "id": "slack-saved-sync",
+      "name": "Slack Saved Sync",
+      "category": "manual",
+      "description": "Sync Slack messages with :w: reaction into Obsidian Task Notes"
+    },
+    {
+      "id": "reflection",
+      "name": "Reflection",
+      "category": "manual",
+      "description": "Personal growth reflection and pattern analysis"
+    },
+    {
+      "id": "morning-checkin",
+      "name": "Morning Check-in",
+      "category": "manual",
+      "description": "Voice or text morning check-in with structured reflection"
+    },
+    {
+      "id": "clippings-legacy",
+      "name": "Process Legacy Clippings",
+      "category": "manual",
+      "description": "Add frontmatter and file loose notes in Resources root"
+    },
+    {
       "id": "main-sync",
       "name": "Main Sync",
       "category": "skill",
