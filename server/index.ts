@@ -188,6 +188,16 @@ fs.watch(RUNS_DIR, (_eventType, filename) => {
   }, 300);
 });
 
+// Serve the built frontend (production). Registered after all /api routes so
+// the SPA fallback can't shadow them.
+const distDir = path.join(__dirname, "..", "dist");
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir));
+  app.get(/^\/(?!api\/).*/, (_req, res) => {
+    res.sendFile(path.join(distDir, "index.html"));
+  });
+}
+
 app.listen(PORT, () => {
   console.log(`Script Dashboard API running on http://localhost:${PORT}`);
   console.log(`Reading runs from: ${RUNS_DIR}`);
