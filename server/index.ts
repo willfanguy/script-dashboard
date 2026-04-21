@@ -195,7 +195,8 @@ app.post("/api/runs/:id/reviewed", (req, res) => {
   try {
     writeRunFileAtomic(req.params.id, record);
     res.json(record);
-  } catch {
+  } catch (err) {
+    console.error(`[reviewed] failed to write run ${req.params.id}:`, err);
     res.status(500).json({ error: "Failed to write run record" });
   }
 });
@@ -210,7 +211,8 @@ app.delete("/api/runs/:id/reviewed", (req, res) => {
   try {
     writeRunFileAtomic(req.params.id, record);
     res.json(record);
-  } catch {
+  } catch (err) {
+    console.error(`[unreviewed] failed to write run ${req.params.id}:`, err);
     res.status(500).json({ error: "Failed to write run record" });
   }
 });
@@ -225,6 +227,7 @@ function handleArtifactError(
     res.status(err.status).json({ error: err.message });
     return;
   }
+  console.error("[artifacts] internal error:", err);
   res.status(500).json({
     error: "Internal error",
     detail: err instanceof Error ? err.message : String(err),

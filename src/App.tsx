@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { useRuns } from "@/hooks/use-runs";
 import { RunList, type RunListView } from "@/components/RunList";
 import { Badge } from "@/components/ui/badge";
-import { RefreshCw, LayoutList, Clock } from "lucide-react";
+import { RefreshCw, LayoutList, Clock, Inbox } from "lucide-react";
 
 const VIEW_STORAGE_KEY = "script-dashboard:view";
 
 function loadView(): RunListView {
   const stored = localStorage.getItem(VIEW_STORAGE_KEY);
-  return stored === "chronological" ? "chronological" : "grouped";
+  if (stored === "chronological" || stored === "review") return stored;
+  return "grouped";
 }
 
 function App() {
@@ -86,6 +87,23 @@ function App() {
                 }`}
               >
                 <Clock className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => setView("review")}
+                aria-pressed={view === "review"}
+                title="Review queue (needs review, oldest first)"
+                className={`relative p-1.5 rounded-sm transition-colors ${
+                  view === "review"
+                    ? "bg-muted text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Inbox className="h-4 w-4" />
+                {needsReviewCount > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 bg-amber-500 text-[9px] leading-none text-white rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-1">
+                    {needsReviewCount}
+                  </span>
+                )}
               </button>
             </div>
             <button

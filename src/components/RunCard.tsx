@@ -23,9 +23,11 @@ import {
   Clock,
   Check,
   RotateCcw,
+  Archive,
 } from "lucide-react";
 import { ArtifactReview } from "@/components/ArtifactReview";
 import {
+  archiveArtifact,
   markRunReviewed,
   unmarkRunReviewed,
 } from "@/lib/artifacts-api";
@@ -103,6 +105,40 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
     } finally {
       setReviewBusy(false);
     }
+  };
+
+  const archivableArtifacts = artifacts.filter((a) => a.type === "task-note");
+
+  const handleArchiveAll = async () => {
+    if (archivableArtifacts.length === 0) return;
+    const n = archivableArtifacts.length;
+    if (!window.confirm(`Archive ${n} task note${n === 1 ? "" : "s"}?`))
+      return;
+    setReviewBusy(true);
+    setReviewError(null);
+    const failures: string[] = [];
+    // Sequential: keeps error surface simple and prevents any fs races
+    // between concurrent archives in the same dir.
+    for (const artifact of archivableArtifacts) {
+      try {
+        await archiveArtifact(artifact.path);
+        setArtifacts((prev) =>
+          prev.filter(
+            (x) => !(x.type === artifact.type && x.path === artifact.path),
+          ),
+        );
+      } catch (err) {
+        failures.push(
+          `${artifact.label}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    if (failures.length > 0) {
+      setReviewError(
+        `Archived ${n - failures.length} of ${n}. Failures:\n${failures.join("\n")}`,
+      );
+    }
+    setReviewBusy(false);
   };
 
   return (
@@ -188,42 +224,53 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
 
             {showReviewPane && (
               <div className="space-y-3 pt-2 border-t border-border/60">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     Review
                   </h3>
-                  {run.reviewRequired && !reviewedAt && (
-                    <button
-                      onClick={handleMarkReviewed}
-                      disabled={reviewBusy}
-                      className="text-xs flex items-center gap-1.5 px-3 py-1 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-                    >
-                      <Check className="h-3 w-3" />
-                      Mark reviewed
-                    </button>
-                  )}
-                  {reviewedAt && (
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>
-                        Reviewed {timeAgo(reviewedAt)}
-                      </span>
+                  <div className="flex items-center gap-2">
+                    {archivableArtifacts.length >= 2 && (
                       <button
-                        onClick={handleUnmarkReviewed}
+                        onClick={handleArchiveAll}
                         disabled={reviewBusy}
-                        className="flex items-center gap-1 hover:text-foreground"
-                        title="Un-mark reviewed"
+                        className="text-xs flex items-center gap-1.5 px-3 py-1 rounded-md border hover:bg-muted disabled:opacity-50"
+                        title={`Archive all ${archivableArtifacts.length} task notes`}
                       >
-                        <RotateCcw className="h-3 w-3" />
-                        undo
+                        <Archive className="h-3 w-3" />
+                        Archive all
                       </button>
-                    </div>
-                  )}
+                    )}
+                    {run.reviewRequired && !reviewedAt && (
+                      <button
+                        onClick={handleMarkReviewed}
+                        disabled={reviewBusy}
+                        className="text-xs flex items-center gap-1.5 px-3 py-1 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                      >
+                        <Check className="h-3 w-3" />
+                        Mark reviewed
+                      </button>
+                    )}
+                    {reviewedAt && (
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <span>Reviewed {timeAgo(reviewedAt)}</span>
+                        <button
+                          onClick={handleUnmarkReviewed}
+                          disabled={reviewBusy}
+                          className="flex items-center gap-1 hover:text-foreground"
+                          title="Un-mark reviewed"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          undo
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {reviewError && (
-                  <div className="text-xs text-destructive">
+                  <pre className="text-xs text-destructive whitespace-pre-wrap break-words">
                     {reviewError}
-                  </div>
+                  </pre>
                 )}
 
                 {hasArtifacts && (

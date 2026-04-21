@@ -3,7 +3,7 @@ import { RunCard } from "./RunCard";
 import { Separator } from "@/components/ui/separator";
 import { groupByCategory } from "@/utils/groupByCategory";
 
-export type RunListView = "grouped" | "chronological";
+export type RunListView = "grouped" | "chronological" | "review";
 
 interface RunListProps {
   runs: RunRecord[];
@@ -35,6 +35,38 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
     return (
       <div className="space-y-2">
         {sorted.map((run) => (
+          <RunCard
+            key={run.id}
+            run={run}
+            scriptInfo={scriptMap.get(run.script)}
+            onExpand={onExpand}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  if (view === "review") {
+    // Review queue: runs flagged reviewRequired that haven't been reviewed yet,
+    // oldest first — handle the older ones before they get buried.
+    const queue = runs
+      .filter((r) => r.reviewRequired && !r.reviewedAt)
+      .sort((a, b) => (a.startEpoch || 0) - (b.startEpoch || 0));
+
+    if (queue.length === 0) {
+      return (
+        <div className="text-center py-16 text-muted-foreground">
+          <p className="text-lg">Review queue is empty</p>
+          <p className="text-sm mt-2">
+            Runs that emit <code className="bg-muted px-1.5 py-0.5 rounded text-xs">--review</code> will appear here.
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-2">
+        {queue.map((run) => (
           <RunCard
             key={run.id}
             run={run}
