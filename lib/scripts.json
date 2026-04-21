@@ -126,7 +126,7 @@
     {
       "id": "slack-saved-sync",
       "name": "Slack Saved Sync",
-      "category": "manual",
+      "category": "skill",
       "description": "Sync Slack messages with :w: reaction into Obsidian Task Notes"
     },
     {
