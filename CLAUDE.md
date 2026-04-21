@@ -138,12 +138,15 @@ SCRIPT_DASH_NOTIFY="1"                        # Set to "0" to suppress notificat
 ```json
 {
   "artifactRoots": [
-    { "root": "/path/to/vault/Tasks", "archive": "/path/to/vault/Archive" }
+    { "root": "/path/to/vault/Work Log/Tasks", "archive": "/path/to/vault/Work Log/Archive" },
+    { "root": "/path/to/vault/Resources", "archive": "/path/to/vault/Resources-Archive" }
   ]
 }
 ```
 
-If `artifactRoots` is empty or the file is missing, artifact endpoints return `503` and the dashboard falls back to showing plain output only. See `lib/server-config.example.json`.
+**Order matters**: roots are checked top-to-bottom and the first match wins. If a narrow root (e.g. `.../Work Log/Tasks`) is nested inside a broader one (e.g. `.../Resources` when Work Log lives inside Resources), list the narrow one **first** so its files archive to the right location.
+
+If `artifactRoots` is empty or the file is missing, artifact endpoints return `503` and the dashboard falls back to showing plain output only. Server re-reads this file only at startup — restart the server after edits. See `lib/server-config.example.json`.
 
 ## Review workflow
 
