@@ -1,0 +1,12 @@
+{
+  "_comment": "Server-side dashboard config. Copy to ~/.config/script-dashboard/server-config.json and edit. See CLAUDE.md / README.",
+  "_schema": {
+    "artifactRoots": "array of { root, archive } pairs. The dashboard can only read/edit/archive files under one of these roots. 'root' is where artifacts live; 'archive' is where the Archive button moves them."
+  },
+  "artifactRoots": [
+    {
+      "root": "/absolute/path/to/your/vault/Tasks",
+      "archive": "/absolute/path/to/your/vault/Archive"
+    }
+  ]
+}

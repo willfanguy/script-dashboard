@@ -6,8 +6,7 @@ import {
 } from "@/components/ui/collapsible";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import type { RunRecord, ScriptInfo } from "@/types";
+import type { Artifact, RunRecord, ScriptInfo } from "@/types";
 import {
   statusVariant,
   formatDuration,
@@ -22,7 +21,14 @@ import {
   Skull,
   ChevronRight,
   Clock,
+  Check,
+  RotateCcw,
 } from "lucide-react";
+import { ArtifactReview } from "@/components/ArtifactReview";
+import {
+  markRunReviewed,
+  unmarkRunReviewed,
+} from "@/lib/artifacts-api";
 
 interface RunCardProps {
   run: RunRecord;
@@ -47,6 +53,16 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [output, setOutput] = useState<string | null>(null);
   const [loadingOutput, setLoadingOutput] = useState(false);
+  // Artifacts / review state is kept local so we can reflect user actions
+  // (archive, mark reviewed) without waiting for the SSE re-fetch round-trip.
+  const [artifacts, setArtifacts] = useState<Artifact[]>(
+    run.artifacts ?? [],
+  );
+  const [reviewedAt, setReviewedAt] = useState<string | undefined>(
+    run.reviewedAt,
+  );
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
 
   const handleToggle = async () => {
     if (!expanded && output === null) {
@@ -59,10 +75,43 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
   };
 
   const displayName = scriptInfo?.name || run.script;
+  const needsReview = !!run.reviewRequired && !reviewedAt;
+  const hasArtifacts = artifacts.length > 0;
+  const showReviewPane = hasArtifacts || run.reviewRequired;
+
+  const handleMarkReviewed = async () => {
+    setReviewBusy(true);
+    setReviewError(null);
+    try {
+      const updated = await markRunReviewed(run.id);
+      setReviewedAt(updated.reviewedAt);
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
+  const handleUnmarkReviewed = async () => {
+    setReviewBusy(true);
+    setReviewError(null);
+    try {
+      await unmarkRunReviewed(run.id);
+      setReviewedAt(undefined);
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReviewBusy(false);
+    }
+  };
 
   return (
     <Collapsible open={expanded} onOpenChange={handleToggle}>
-      <Card className="p-0 overflow-hidden">
+      <Card
+        className={`p-0 overflow-hidden ${
+          needsReview ? "border-l-4 border-l-amber-500" : ""
+        }`}
+      >
         <CollapsibleTrigger className="w-full cursor-pointer">
           <div className="flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors">
             <StatusIcon status={run.status} />
@@ -78,6 +127,20 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
                 {run.exitCode !== undefined && run.exitCode !== 0 && (
                   <span className="text-xs text-muted-foreground">
                     exit {run.exitCode}
+                  </span>
+                )}
+                {needsReview && (
+                  <Badge
+                    variant="outline"
+                    className="text-xs border-amber-500 text-amber-600"
+                  >
+                    needs review
+                  </Badge>
+                )}
+                {hasArtifacts && (
+                  <span className="text-xs text-muted-foreground">
+                    {artifacts.length} artifact
+                    {artifacts.length === 1 ? "" : "s"}
                   </span>
                 )}
               </div>
@@ -109,18 +172,82 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
         </CollapsibleTrigger>
 
         <CollapsibleContent>
-          <div className="border-t px-4 py-3 bg-muted/30">
+          <div className="border-t px-4 py-3 bg-muted/30 space-y-4">
             {loadingOutput ? (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader className="h-3 w-3 animate-spin" />
                 Loading output...
               </div>
             ) : (
-              <ScrollArea className="max-h-80">
+              <div className="max-h-80 overflow-y-auto">
                 <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground/80">
                   {output}
                 </pre>
-              </ScrollArea>
+              </div>
+            )}
+
+            {showReviewPane && (
+              <div className="space-y-3 pt-2 border-t border-border/60">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Review
+                  </h3>
+                  {run.reviewRequired && !reviewedAt && (
+                    <button
+                      onClick={handleMarkReviewed}
+                      disabled={reviewBusy}
+                      className="text-xs flex items-center gap-1.5 px-3 py-1 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                    >
+                      <Check className="h-3 w-3" />
+                      Mark reviewed
+                    </button>
+                  )}
+                  {reviewedAt && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>
+                        Reviewed {timeAgo(reviewedAt)}
+                      </span>
+                      <button
+                        onClick={handleUnmarkReviewed}
+                        disabled={reviewBusy}
+                        className="flex items-center gap-1 hover:text-foreground"
+                        title="Un-mark reviewed"
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                        undo
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {reviewError && (
+                  <div className="text-xs text-destructive">
+                    {reviewError}
+                  </div>
+                )}
+
+                {hasArtifacts && (
+                  <div className="space-y-2">
+                    {artifacts.map((a) => (
+                      <ArtifactReview
+                        key={`${a.type}:${a.path}`}
+                        artifact={a}
+                        onArchived={(archived) =>
+                          setArtifacts((prev) =>
+                            prev.filter(
+                              (x) =>
+                                !(
+                                  x.type === archived.type &&
+                                  x.path === archived.path
+                                ),
+                            ),
+                          )
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </CollapsibleContent>

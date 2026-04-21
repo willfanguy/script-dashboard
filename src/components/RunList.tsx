@@ -3,14 +3,16 @@ import { RunCard } from "./RunCard";
 import { Separator } from "@/components/ui/separator";
 import { groupByCategory } from "@/utils/groupByCategory";
 
+export type RunListView = "grouped" | "chronological";
+
 interface RunListProps {
   runs: RunRecord[];
   registry: ScriptRegistry | null;
   onExpand: (id: string) => Promise<RunRecord | null>;
+  view: RunListView;
 }
 
-export function RunList({ runs, registry, onExpand }: RunListProps) {
-  const grouped = groupByCategory(runs, registry);
+export function RunList({ runs, registry, onExpand, view }: RunListProps) {
   const scriptMap = new Map(
     registry?.scripts.map((s) => [s.id, s]) || []
   );
@@ -25,6 +27,26 @@ export function RunList({ runs, registry, onExpand }: RunListProps) {
       </div>
     );
   }
+
+  if (view === "chronological") {
+    const sorted = [...runs].sort(
+      (a, b) => (b.startEpoch || 0) - (a.startEpoch || 0)
+    );
+    return (
+      <div className="space-y-2">
+        {sorted.map((run) => (
+          <RunCard
+            key={run.id}
+            run={run}
+            scriptInfo={scriptMap.get(run.script)}
+            onExpand={onExpand}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  const grouped = groupByCategory(runs, registry);
 
   return (
     <div className="space-y-8">

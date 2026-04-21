@@ -38,6 +38,8 @@ _SD_OUTPUT_FILE=""
 _SD_START_EPOCH=""
 _SD_SCRIPT_NAME=""
 _SD_CATEGORY=""
+_SD_ARTIFACTS=""        # Comma-separated JSON object entries, accumulated across report_artifact calls
+_SD_REVIEW_REQUIRED="false"
 
 # --- Helpers ---
 
@@ -100,6 +102,8 @@ report_start() {
 
     _SD_SCRIPT_NAME="$name"
     _SD_CATEGORY="$category"
+    _SD_ARTIFACTS=""
+    _SD_REVIEW_REQUIRED="false"
     _SD_START_EPOCH=$(_sd_epoch)
     _SD_RUN_ID="${name}-$(_sd_iso_date | tr ':' '-')-$$"
     _SD_RUN_FILE="${SCRIPT_RUNS_DIR}/${_SD_RUN_ID}.json"
@@ -137,6 +141,40 @@ report_log() {
     printf '%s\n' "$*" >> "$_SD_OUTPUT_FILE"
 }
 
+# report_artifact TYPE LABEL PATH
+#
+# Declare an artifact the run produced. The dashboard uses this to offer
+# in-browser review of the output (rendering, status/priority edits, archive).
+#
+# TYPE:  task-note | file | url
+#   - task-note: a markdown file with YAML frontmatter that the dashboard can edit
+#   - file:      any file (opens externally)
+#   - url:       external link
+# LABEL: human-readable label shown in the dashboard
+# PATH:  absolute filesystem path (for task-note/file) or URL (for url type)
+report_artifact() {
+    local type="$1"
+    local label="$2"
+    local path="$3"
+    local label_json path_json
+    label_json=$(_sd_json_escape "$label")
+    path_json=$(_sd_json_escape "$path")
+    local entry="{\"type\":\"$type\",\"label\":$label_json,\"path\":$path_json}"
+    if [ -z "$_SD_ARTIFACTS" ]; then
+        _SD_ARTIFACTS="$entry"
+    else
+        _SD_ARTIFACTS="$_SD_ARTIFACTS,$entry"
+    fi
+}
+
+# report_review_required
+#
+# Flag the run as needing human review in the dashboard. Combine with
+# report_artifact calls to make the outputs actionable.
+report_review_required() {
+    _SD_REVIEW_REQUIRED="true"
+}
+
 # report_end [EXIT_CODE]
 #
 # Call at the end of a script run. Updates the run record with final status.
@@ -169,6 +207,17 @@ report_end() {
     local desc_json
     desc_json=$(_sd_json_escape "${3:-}")
 
+    # Optional fields, only emitted when present
+    local extras=""
+    if [ -n "$_SD_ARTIFACTS" ]; then
+        extras="${extras},
+  \"artifacts\": [$_SD_ARTIFACTS]"
+    fi
+    if [ "$_SD_REVIEW_REQUIRED" = "true" ]; then
+        extras="${extras},
+  \"reviewRequired\": true"
+    fi
+
     cat > "${_SD_RUN_FILE}.tmp" << ENDJSON
 {
   "id": "$_SD_RUN_ID",
@@ -183,7 +232,7 @@ report_end() {
   "duration": $duration,
   "pid": $$,
   "host": "$(hostname -s)",
-  "output": $output_json
+  "output": $output_json${extras}
 }
 ENDJSON
     mv "${_SD_RUN_FILE}.tmp" "$_SD_RUN_FILE"
