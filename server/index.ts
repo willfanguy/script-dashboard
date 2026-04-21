@@ -4,6 +4,14 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
+import {
+  ArtifactError,
+  archiveArtifact,
+  loadArtifactsConfig,
+  patchArtifact,
+  readArtifact,
+  resolveSafePath,
+} from "./artifacts.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,8 +24,16 @@ const RUNS_DIR =
   process.env.SCRIPT_RUNS_DIR ||
   path.join(os.homedir(), ".script-runs", "runs");
 
+const ARTIFACTS_CONFIG = loadArtifactsConfig();
+
 app.use(cors());
 app.use(express.json());
+
+interface Artifact {
+  type: "task-note" | "file" | "url";
+  label: string;
+  path: string;
+}
 
 interface RunRecord {
   id: string;
@@ -34,6 +50,9 @@ interface RunRecord {
   pid?: number;
   host?: string;
   output?: string;
+  artifacts?: Artifact[];
+  reviewRequired?: boolean;
+  reviewedAt?: string;
 }
 
 function readRunFiles(): RunRecord[] {
@@ -144,6 +163,120 @@ app.post("/api/runs/cleanup", (req, res) => {
   }
 
   res.json({ deleted, cutoffDays: days });
+});
+
+// --- Review state mutation ---
+
+function readRunFile(id: string): RunRecord | null {
+  const runFile = path.join(RUNS_DIR, `${id}.json`);
+  if (!fs.existsSync(runFile)) return null;
+  try {
+    const raw = fs.readFileSync(runFile, "utf-8");
+    return JSON.parse(raw) as RunRecord;
+  } catch {
+    return null;
+  }
+}
+
+function writeRunFileAtomic(id: string, record: RunRecord): void {
+  const runFile = path.join(RUNS_DIR, `${id}.json`);
+  const tmp = `${runFile}.tmp.${process.pid}.${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(record, null, 2), "utf-8");
+  fs.renameSync(tmp, runFile);
+}
+
+app.post("/api/runs/:id/reviewed", (req, res) => {
+  const record = readRunFile(req.params.id);
+  if (!record) {
+    res.status(404).json({ error: "Run not found" });
+    return;
+  }
+  record.reviewedAt = new Date().toISOString();
+  try {
+    writeRunFileAtomic(req.params.id, record);
+    res.json(record);
+  } catch {
+    res.status(500).json({ error: "Failed to write run record" });
+  }
+});
+
+app.delete("/api/runs/:id/reviewed", (req, res) => {
+  const record = readRunFile(req.params.id);
+  if (!record) {
+    res.status(404).json({ error: "Run not found" });
+    return;
+  }
+  delete record.reviewedAt;
+  try {
+    writeRunFileAtomic(req.params.id, record);
+    res.json(record);
+  } catch {
+    res.status(500).json({ error: "Failed to write run record" });
+  }
+});
+
+// --- Artifact endpoints ---
+
+function handleArtifactError(
+  err: unknown,
+  res: import("express").Response,
+): void {
+  if (err instanceof ArtifactError) {
+    res.status(err.status).json({ error: err.message });
+    return;
+  }
+  res.status(500).json({
+    error: "Internal error",
+    detail: err instanceof Error ? err.message : String(err),
+  });
+}
+
+app.get("/api/artifacts", (req, res) => {
+  try {
+    const { absPath } = resolveSafePath(
+      (req.query.path as string) ?? "",
+      ARTIFACTS_CONFIG,
+    );
+    res.json(readArtifact(absPath));
+  } catch (err) {
+    handleArtifactError(err, res);
+  }
+});
+
+app.patch("/api/artifacts", (req, res) => {
+  try {
+    const { absPath } = resolveSafePath(
+      (req.query.path as string) ?? "",
+      ARTIFACTS_CONFIG,
+    );
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const updated = patchArtifact(absPath, {
+      status:
+        typeof body.status === "string" ? body.status : undefined,
+      priority:
+        typeof body.priority === "string" ? body.priority : undefined,
+      appendNote:
+        typeof body.appendNote === "string" ? body.appendNote : undefined,
+    });
+    res.json(updated);
+  } catch (err) {
+    handleArtifactError(err, res);
+  }
+});
+
+app.post("/api/artifacts/archive", (req, res) => {
+  try {
+    const { absPath, root } = resolveSafePath(
+      (req.query.path as string) ?? "",
+      ARTIFACTS_CONFIG,
+    );
+    const result = archiveArtifact(absPath, root);
+    res.json(result);
+    // Inform any listening clients so the artifact disappears from the UI.
+    broadcastUpdate();
+  } catch (err) {
+    handleArtifactError(err, res);
+  }
 });
 
 // --- Server-Sent Events for live updates ---

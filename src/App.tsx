@@ -24,6 +24,9 @@ function App() {
   const failedRecent = runs
     .slice(0, 20)
     .filter((r) => r.status === "failed").length;
+  const needsReviewCount = runs.filter(
+    (r) => r.reviewRequired && !r.reviewedAt,
+  ).length;
 
   return (
     <div className="min-h-screen bg-background">
@@ -43,6 +46,14 @@ function App() {
             {failedRecent > 0 && (
               <Badge variant="destructive" className="text-xs">
                 {failedRecent} failed
+              </Badge>
+            )}
+            {needsReviewCount > 0 && (
+              <Badge
+                variant="outline"
+                className="text-xs border-amber-500 text-amber-600"
+              >
+                {needsReviewCount} needs review
               </Badge>
             )}
           </div>

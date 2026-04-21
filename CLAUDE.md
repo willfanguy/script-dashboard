@@ -89,6 +89,11 @@ npm run test:watch   # Watch mode
 | GET | `/api/scripts` | Script registry |
 | DELETE | `/api/runs/:id` | Delete a run record |
 | POST | `/api/runs/cleanup` | Delete runs older than N days. Body: `{ "days": 7 }` |
+| POST | `/api/runs/:id/reviewed` | Mark a run as reviewed (sets `reviewedAt`) |
+| DELETE | `/api/runs/:id/reviewed` | Un-mark a run as reviewed |
+| GET | `/api/artifacts?path=X` | Read a markdown artifact (frontmatter + body). Path must be inside a configured root. |
+| PATCH | `/api/artifacts?path=X` | Update frontmatter (`status`, `priority`) and/or append to `## Notes`. |
+| POST | `/api/artifacts/archive?path=X` | Move the artifact to its root's archive dir |
 
 ## Integrating a Script
 
@@ -117,7 +122,9 @@ report_exec "my-script" "scheduled" "Description here" -- your-command --with-ar
 
 ## Configuration
 
-Copy `lib/config.example.sh` to `~/.config/script-dashboard/config.sh` and customize:
+Two separate config files:
+
+**Shell config** — `~/.config/script-dashboard/config.sh` (sourced by `report.sh`):
 
 ```bash
 SCRIPT_RUNS_DIR="$HOME/.script-runs/runs"    # Where run records live
@@ -125,6 +132,22 @@ SCRIPT_DASH_URL="http://localhost:7890"       # Dashboard URL for notifications
 SCRIPT_DASH_BROWSER="Google Chrome for Testing"  # Browser for notification clicks
 SCRIPT_DASH_NOTIFY="1"                        # Set to "0" to suppress notifications
 ```
+
+**Server config** — `~/.config/script-dashboard/server-config.json` (read by the Express server at startup; controls which dirs the artifact-review endpoints can read/write):
+
+```json
+{
+  "artifactRoots": [
+    { "root": "/path/to/vault/Tasks", "archive": "/path/to/vault/Archive" }
+  ]
+}
+```
+
+If `artifactRoots` is empty or the file is missing, artifact endpoints return `503` and the dashboard falls back to showing plain output only. See `lib/server-config.example.json`.
+
+## Review workflow
+
+Scripts that create files you want to review later can flag their run with `report_review_required` and emit artifact links with `report_artifact TYPE LABEL PATH` (or `--review` / `--artifact TYPE LABEL PATH` when using `report-skill.sh`). The dashboard surfaces those runs in a "Needs Review" badge and renders each artifact inline with editable status/priority, a notes-append field, and an archive button. All edits go straight to the file on disk — the vault stays the source of truth.
 
 ## Public Repo Notes
 
