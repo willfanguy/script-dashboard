@@ -6,7 +6,6 @@ import {
 } from "@/components/ui/collapsible";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import type { RunRecord, ScriptInfo } from "@/types";
 import {
   statusVariant,
@@ -116,11 +115,11 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
                 Loading output...
               </div>
             ) : (
-              <ScrollArea className="max-h-80">
+              <div className="max-h-80 overflow-y-auto">
                 <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground/80">
                   {output}
                 </pre>
-              </ScrollArea>
+              </div>
             )}
           </div>
         </CollapsibleContent>
