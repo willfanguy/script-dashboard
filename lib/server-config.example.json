@@ -1,12 +1,18 @@
 {
-  "_comment": "Server-side dashboard config. Copy to ~/.config/script-dashboard/server-config.json and edit. See CLAUDE.md / README.",
+  "_comment": "Server-side dashboard config. Copy to ~/.config/script-dashboard/server-config.json and edit. See CLAUDE.md.",
   "_schema": {
-    "artifactRoots": "array of { root, archive } pairs. The dashboard can only read/edit/archive files under one of these roots. 'root' is where artifacts live; 'archive' is where the Archive button moves them."
+    "artifactRoots": "Array of { root, archive } pairs. The dashboard's artifact endpoints only accept paths that resolve inside one of these roots; anything else returns 400. 'root' is where emitted artifacts live on disk; 'archive' is where the Archive button moves them. Order matters: roots are checked in order and the first match wins, so list the most specific roots first when they're nested inside broader ones."
   },
   "artifactRoots": [
     {
-      "root": "/absolute/path/to/your/vault/Tasks",
-      "archive": "/absolute/path/to/your/vault/Archive"
+      "_comment": "Example: a narrow Tasks root with its own Archive (typical for slack-saved-sync, meeting-tasks-extractor). Listed first so Task Notes archive to Work Log/Archive, not the broader Resources archive.",
+      "root": "/absolute/path/to/your/vault/Work Log/Tasks",
+      "archive": "/absolute/path/to/your/vault/Work Log/Archive"
+    },
+    {
+      "_comment": "Example: a broader Resources root (covers clippings, drafts/reminders inbox fillings, connection-enricher targets). Files outside Work Log/Tasks still match here.",
+      "root": "/absolute/path/to/your/vault/Resources",
+      "archive": "/absolute/path/to/your/vault/Resources-Archive"
     }
   ]
 }
