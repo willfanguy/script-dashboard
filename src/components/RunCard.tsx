@@ -190,7 +190,7 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
       <Card
         className={`p-0 overflow-hidden ${
           showStallBorder
-            ? "border-l-4 border-l-amber-500"
+            ? "border-l-4 border-l-red-500"
             : needsReview
               ? "border-l-4 border-l-amber-500"
               : ""
