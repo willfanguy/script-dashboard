@@ -4,6 +4,8 @@ import {
   statusVariant,
   timeAgo,
   formatDate,
+  progressState,
+  elapsedSeconds,
 } from "@/utils/formatting";
 
 // --- formatDuration ---
@@ -98,5 +100,66 @@ describe("formatDate", () => {
     expect(result).toMatch(/Fri/);
     expect(result).toMatch(/Apr/);
     expect(result).toMatch(/10/);
+  });
+});
+
+// --- progressState ---
+
+describe("progressState", () => {
+  const NOW = new Date("2026-04-21T12:00:00Z").getTime();
+
+  it("returns 'unknown' when no heartbeat has been reported", () => {
+    expect(progressState(undefined, NOW)).toBe("unknown");
+  });
+
+  it("returns 'fresh' for heartbeats under 60s old", () => {
+    const t = new Date(NOW - 30_000).toISOString();
+    expect(progressState(t, NOW)).toBe("fresh");
+  });
+
+  it("returns 'fresh' at the 0s boundary", () => {
+    const t = new Date(NOW).toISOString();
+    expect(progressState(t, NOW)).toBe("fresh");
+  });
+
+  it("returns 'slow' at 60s and under 5m", () => {
+    const t60 = new Date(NOW - 60_000).toISOString();
+    const t4m = new Date(NOW - 4 * 60_000).toISOString();
+    expect(progressState(t60, NOW)).toBe("slow");
+    expect(progressState(t4m, NOW)).toBe("slow");
+  });
+
+  it("returns 'stalled' at 5m and older", () => {
+    const t5m = new Date(NOW - 5 * 60_000).toISOString();
+    const t1h = new Date(NOW - 3_600_000).toISOString();
+    expect(progressState(t5m, NOW)).toBe("stalled");
+    expect(progressState(t1h, NOW)).toBe("stalled");
+  });
+
+  it("handles future timestamps defensively (clock skew)", () => {
+    const future = new Date(NOW + 30_000).toISOString();
+    // Negative age still < 60, so callers see 'fresh'. Invariant: never throws.
+    expect(progressState(future, NOW)).toBe("fresh");
+  });
+});
+
+// --- elapsedSeconds ---
+
+describe("elapsedSeconds", () => {
+  const NOW = new Date("2026-04-21T12:00:00Z").getTime();
+
+  it("returns seconds since start", () => {
+    const started = new Date(NOW - 125_000).toISOString();
+    expect(elapsedSeconds(started, NOW)).toBe(125);
+  });
+
+  it("clamps to 0 for future start times", () => {
+    const future = new Date(NOW + 10_000).toISOString();
+    expect(elapsedSeconds(future, NOW)).toBe(0);
+  });
+
+  it("returns 0 when start equals now", () => {
+    const same = new Date(NOW).toISOString();
+    expect(elapsedSeconds(same, NOW)).toBe(0);
   });
 });

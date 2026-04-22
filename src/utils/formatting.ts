@@ -54,3 +54,26 @@ export function timeAgo(iso: string): string {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
   return `${Math.floor(seconds / 86400)}d ago`;
 }
+
+export type ProgressState = "fresh" | "slow" | "stalled" | "unknown";
+
+// Classify a running script by time since last progress heartbeat.
+// Scripts that never call report_progress report "unknown" — we can't
+// distinguish stalled from just-quiet.
+export function progressState(
+  lastProgressAt: string | undefined,
+  nowMs: number = Date.now(),
+): ProgressState {
+  if (!lastProgressAt) return "unknown";
+  const ageSec = Math.floor((nowMs - new Date(lastProgressAt).getTime()) / 1000);
+  if (ageSec < 60) return "fresh";
+  if (ageSec < 300) return "slow";
+  return "stalled";
+}
+
+export function elapsedSeconds(
+  startedAt: string,
+  nowMs: number = Date.now(),
+): number {
+  return Math.max(0, Math.floor((nowMs - new Date(startedAt).getTime()) / 1000));
+}

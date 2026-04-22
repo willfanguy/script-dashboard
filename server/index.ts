@@ -53,7 +53,13 @@ interface RunRecord {
   artifacts?: Artifact[];
   reviewRequired?: boolean;
   reviewedAt?: string;
+  lastProgressAt?: string;
+  lastProgressMessage?: string;
 }
+
+// Cap live-output responses so an unbounded log can't blow up the JSON payload.
+// Matches the 100KB tail truncation that report.sh applies at end-of-run.
+const LIVE_OUTPUT_TAIL_BYTES = 102_400;
 
 function readRunFiles(): RunRecord[] {
   if (!fs.existsSync(RUNS_DIR)) return [];
@@ -92,7 +98,31 @@ app.get("/api/runs", (_req, res) => {
   res.json(summary);
 });
 
-// GET /api/runs/:id — get a single run with full output
+function readLiveOutputTail(id: string): string | null {
+  const outputFile = path.join(RUNS_DIR, `${id}.output`);
+  if (!fs.existsSync(outputFile)) return null;
+  try {
+    const stat = fs.statSync(outputFile);
+    if (stat.size === 0) return "";
+    const start = Math.max(0, stat.size - LIVE_OUTPUT_TAIL_BYTES);
+    const fd = fs.openSync(outputFile, "r");
+    try {
+      const len = stat.size - start;
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, start);
+      return buf.toString("utf-8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+// GET /api/runs/:id — get a single run with full output.
+// For running runs, the live tail of the .output file is stitched in so the
+// dashboard can show progress mid-flight. Once the run ends, report.sh writes
+// the final output into the JSON and deletes the .output file.
 app.get("/api/runs/:id", (req, res) => {
   const runFile = path.join(RUNS_DIR, `${req.params.id}.json`);
 
@@ -104,6 +134,10 @@ app.get("/api/runs/:id", (req, res) => {
   try {
     const raw = fs.readFileSync(runFile, "utf-8");
     const record = JSON.parse(raw) as RunRecord;
+    if (record.status === "running") {
+      const live = readLiveOutputTail(req.params.id);
+      if (live !== null) record.output = live;
+    }
     res.json(record);
   } catch {
     res.status(500).json({ error: "Failed to read run record" });

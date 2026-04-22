@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { RunRecord, ScriptRegistry } from "@/types";
 import { RunCard } from "./RunCard";
 import { Separator } from "@/components/ui/separator";
@@ -12,10 +14,46 @@ interface RunListProps {
   view: RunListView;
 }
 
+const COLLAPSED_STORAGE_KEY = "script-dashboard:collapsed-categories";
+
+function loadCollapsed(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(COLLAPSED_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
 export function RunList({ runs, registry, onExpand, view }: RunListProps) {
   const scriptMap = new Map(
     registry?.scripts.map((s) => [s.id, s]) || []
   );
+
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        COLLAPSED_STORAGE_KEY,
+        JSON.stringify(Array.from(collapsed))
+      );
+    } catch {
+      // ignore storage failures (private mode, quota, etc.)
+    }
+  }, [collapsed]);
+
+  const toggleCategory = (category: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(category)) next.delete(category);
+      else next.add(category);
+      return next;
+    });
+  };
 
   if (runs.length === 0) {
     return (
@@ -84,27 +122,42 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
     <div className="space-y-8">
       {Array.from(grouped.entries()).map(([category, categoryRuns]) => {
         const catInfo = registry?.categories[category];
+        const isCollapsed = collapsed.has(category);
+        const label = catInfo?.label || category;
         return (
           <section key={category}>
-            <div className="flex items-center gap-3 mb-3">
-              <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                {catInfo?.label || category}
+            <button
+              type="button"
+              onClick={() => toggleCategory(category)}
+              aria-expanded={!isCollapsed}
+              aria-controls={`category-${category}`}
+              className="flex items-center gap-3 mb-3 w-full text-left group"
+            >
+              {isCollapsed ? (
+                <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-foreground transition-colors" />
+              ) : (
+                <ChevronDown className="h-4 w-4 text-muted-foreground group-hover:text-foreground transition-colors" />
+              )}
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground group-hover:text-foreground transition-colors">
+                {label}
               </h2>
               <Separator className="flex-1" />
               <span className="text-xs text-muted-foreground">
                 {categoryRuns.length} run{categoryRuns.length !== 1 ? "s" : ""}
               </span>
-            </div>
-            <div className="space-y-2">
-              {categoryRuns.map((run) => (
-                <RunCard
-                  key={run.id}
-                  run={run}
-                  scriptInfo={scriptMap.get(run.script)}
-                  onExpand={onExpand}
-                />
-              ))}
-            </div>
+            </button>
+            {!isCollapsed && (
+              <div id={`category-${category}`} className="space-y-2">
+                {categoryRuns.map((run) => (
+                  <RunCard
+                    key={run.id}
+                    run={run}
+                    scriptInfo={scriptMap.get(run.script)}
+                    onExpand={onExpand}
+                  />
+                ))}
+              </div>
+            )}
           </section>
         );
       })}

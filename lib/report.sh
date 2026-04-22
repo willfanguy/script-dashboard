@@ -38,8 +38,11 @@ _SD_OUTPUT_FILE=""
 _SD_START_EPOCH=""
 _SD_SCRIPT_NAME=""
 _SD_CATEGORY=""
+_SD_DESCRIPTION=""
 _SD_ARTIFACTS=""        # Comma-separated JSON object entries, accumulated across report_artifact calls
 _SD_REVIEW_REQUIRED="false"
+_SD_LAST_PROGRESS_AT=""
+_SD_LAST_PROGRESS_MSG=""
 
 # --- Helpers ---
 
@@ -102,8 +105,11 @@ report_start() {
 
     _SD_SCRIPT_NAME="$name"
     _SD_CATEGORY="$category"
+    _SD_DESCRIPTION="$description"
     _SD_ARTIFACTS=""
     _SD_REVIEW_REQUIRED="false"
+    _SD_LAST_PROGRESS_AT=""
+    _SD_LAST_PROGRESS_MSG=""
     _SD_START_EPOCH=$(_sd_epoch)
     _SD_RUN_ID="${name}-$(_sd_iso_date | tr ':' '-')-$$"
     _SD_RUN_FILE="${SCRIPT_RUNS_DIR}/${_SD_RUN_ID}.json"
@@ -112,21 +118,38 @@ report_start() {
     # Create output capture file
     : > "$_SD_OUTPUT_FILE"
 
-    # Write initial run record
+    _sd_write_running_json
+}
+
+# _sd_write_running_json
+#
+# (Re)write the run record while the script is in progress. Called from
+# report_start and report_progress. The server exposes the live .output file
+# for running runs, so we only embed metadata — not the output — here.
+_sd_write_running_json() {
     local desc_json
-    desc_json=$(_sd_json_escape "$description")
+    desc_json=$(_sd_json_escape "$_SD_DESCRIPTION")
+
+    local progress_fields=""
+    if [ -n "$_SD_LAST_PROGRESS_AT" ]; then
+        local msg_json
+        msg_json=$(_sd_json_escape "$_SD_LAST_PROGRESS_MSG")
+        progress_fields=",
+  \"lastProgressAt\": \"$_SD_LAST_PROGRESS_AT\",
+  \"lastProgressMessage\": $msg_json"
+    fi
 
     cat > "${_SD_RUN_FILE}.tmp" << ENDJSON
 {
   "id": "$_SD_RUN_ID",
-  "script": "$name",
-  "category": "$category",
+  "script": "$_SD_SCRIPT_NAME",
+  "category": "$_SD_CATEGORY",
   "description": $desc_json,
   "status": "running",
-  "startedAt": "$(_sd_iso_date)",
+  "startedAt": "$(date -u -r "$_SD_START_EPOCH" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || _sd_iso_date)",
   "startEpoch": $_SD_START_EPOCH,
   "pid": $$,
-  "host": "$(hostname -s)"
+  "host": "$(hostname -s)"${progress_fields}
 }
 ENDJSON
     mv "${_SD_RUN_FILE}.tmp" "$_SD_RUN_FILE"
@@ -139,6 +162,23 @@ ENDJSON
 report_log() {
     [ -z "$_SD_OUTPUT_FILE" ] && return 0
     printf '%s\n' "$*" >> "$_SD_OUTPUT_FILE"
+}
+
+# report_progress MESSAGE
+#
+# Record a heartbeat: appends to the output file like report_log, then atomically
+# rewrites the run JSON with lastProgressAt + a short message. The dashboard uses
+# this to distinguish "running and making progress" from "running but stalled."
+#
+# Use sparingly — only for notable signal lines (phase transitions, pass-rate
+# updates, errors). High-volume per-line output belongs in report_log.
+report_progress() {
+    local message="$*"
+    [ -z "$_SD_RUN_FILE" ] && return 0
+    printf '%s\n' "$message" >> "$_SD_OUTPUT_FILE"
+    _SD_LAST_PROGRESS_AT=$(_sd_iso_date)
+    _SD_LAST_PROGRESS_MSG="$message"
+    _sd_write_running_json
 }
 
 # report_artifact TYPE LABEL PATH
@@ -216,6 +256,13 @@ report_end() {
     if [ "$_SD_REVIEW_REQUIRED" = "true" ]; then
         extras="${extras},
   \"reviewRequired\": true"
+    fi
+    if [ -n "$_SD_LAST_PROGRESS_AT" ]; then
+        local final_msg_json
+        final_msg_json=$(_sd_json_escape "$_SD_LAST_PROGRESS_MSG")
+        extras="${extras},
+  \"lastProgressAt\": \"$_SD_LAST_PROGRESS_AT\",
+  \"lastProgressMessage\": $final_msg_json"
     fi
 
     cat > "${_SD_RUN_FILE}.tmp" << ENDJSON
