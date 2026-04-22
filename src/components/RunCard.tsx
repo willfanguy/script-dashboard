@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -13,6 +13,8 @@ import {
   formatTime,
   formatDate,
   timeAgo,
+  progressState,
+  elapsedSeconds,
 } from "@/utils/formatting";
 import {
   CheckCircle,
@@ -51,10 +53,17 @@ function StatusIcon({ status }: { status: RunRecord["status"] }) {
   }
 }
 
+const RUNNING_TICK_MS = 1_000;
+const RUNNING_OUTPUT_POLL_MS = 3_000;
+
 export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [output, setOutput] = useState<string | null>(null);
   const [loadingOutput, setLoadingOutput] = useState(false);
+  // Monotonic ticker so "elapsed" and "last activity" re-render smoothly while
+  // a run is still live — separate from data re-fetches over SSE / polling.
+  const [, setTick] = useState(0);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Artifacts / review state is kept local so we can reflect user actions
   // (archive, mark reviewed) without waiting for the SSE re-fetch round-trip.
   const [artifacts, setArtifacts] = useState<Artifact[]>(
@@ -66,6 +75,8 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
 
+  const isRunning = run.status === "running";
+
   const handleToggle = async () => {
     if (!expanded && output === null) {
       setLoadingOutput(true);
@@ -76,10 +87,43 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
     setExpanded(!expanded);
   };
 
+  // Live tick while running — drives the elapsed / last-activity readouts.
+  useEffect(() => {
+    if (!isRunning) return;
+    const id = setInterval(() => setTick((t) => t + 1), RUNNING_TICK_MS);
+    return () => clearInterval(id);
+  }, [isRunning]);
+
+  // Poll the detail endpoint while this card is expanded AND the run is
+  // still running, so the tail output grows without waiting for SSE pings.
+  useEffect(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (!expanded || !isRunning) return;
+    pollRef.current = setInterval(async () => {
+      const detail = await onExpand(run.id);
+      if (detail) setOutput(detail.output || "(no output captured)");
+    }, RUNNING_OUTPUT_POLL_MS);
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [expanded, isRunning, onExpand, run.id]);
+
   const displayName = scriptInfo?.name || run.script;
   const needsReview = !!run.reviewRequired && !reviewedAt;
   const hasArtifacts = artifacts.length > 0;
   const showReviewPane = hasArtifacts || run.reviewRequired;
+
+  // Live running-run readouts. For running runs we prefer elapsed-since-start
+  // over the stored duration (which is only written at report_end).
+  const runningElapsed = isRunning ? elapsedSeconds(run.startedAt) : null;
+  const progress = progressState(run.lastProgressAt);
+  const showStallBorder = isRunning && progress === "stalled";
 
   const handleMarkReviewed = async () => {
     setReviewBusy(true);
@@ -145,7 +189,11 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
     <Collapsible open={expanded} onOpenChange={handleToggle}>
       <Card
         className={`p-0 overflow-hidden ${
-          needsReview ? "border-l-4 border-l-amber-500" : ""
+          showStallBorder
+            ? "border-l-4 border-l-red-500"
+            : needsReview
+              ? "border-l-4 border-l-amber-500"
+              : ""
         }`}
       >
         <CollapsibleTrigger className="w-full cursor-pointer">
@@ -165,6 +213,30 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
                     exit {run.exitCode}
                   </span>
                 )}
+                {isRunning && run.lastProgressAt && (
+                  <Badge
+                    variant="outline"
+                    className={`text-xs ${
+                      progress === "fresh"
+                        ? "border-green-500 text-green-600"
+                        : progress === "slow"
+                          ? "border-amber-500 text-amber-600"
+                          : "border-red-500 text-red-600"
+                    }`}
+                    title={`Last progress: ${new Date(run.lastProgressAt).toLocaleString()}`}
+                  >
+                    {progress === "stalled" ? "stalled" : "active"} ·{" "}
+                    {timeAgo(run.lastProgressAt)}
+                  </Badge>
+                )}
+                {isRunning && !run.lastProgressAt && (
+                  <span
+                    className="text-xs text-muted-foreground"
+                    title="Script has not reported progress yet (uses report_log only, or no reporting)"
+                  >
+                    no heartbeat
+                  </span>
+                )}
                 {needsReview && (
                   <Badge
                     variant="outline"
@@ -180,20 +252,32 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
                   </span>
                 )}
               </div>
-              {scriptInfo?.description && (
+              {isRunning && run.lastProgressMessage ? (
+                <p className="text-xs text-muted-foreground truncate mt-0.5 font-mono">
+                  {run.lastProgressMessage}
+                </p>
+              ) : scriptInfo?.description ? (
                 <p className="text-xs text-muted-foreground truncate mt-0.5">
                   {scriptInfo.description}
                 </p>
-              )}
+              ) : null}
             </div>
 
             <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0">
-              {run.duration !== undefined && (
+              {runningElapsed !== null ? (
+                <span
+                  className="flex items-center gap-1"
+                  title="Elapsed since start"
+                >
+                  <Clock className="h-3 w-3" />
+                  {formatDuration(runningElapsed)}
+                </span>
+              ) : run.duration !== undefined ? (
                 <span className="flex items-center gap-1">
                   <Clock className="h-3 w-3" />
                   {formatDuration(run.duration)}
                 </span>
-              )}
+              ) : null}
               <span title={new Date(run.startedAt).toLocaleString()}>
                 {formatDate(run.startedAt)} {formatTime(run.startedAt)}
               </span>

@@ -85,7 +85,7 @@ npm run test:watch   # Watch mode
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/runs` | List recent runs (no output field). Query: `?limit=N&category=X` |
-| GET | `/api/runs/:id` | Single run with full output |
+| GET | `/api/runs/:id` | Single run with full output. For running runs, stitches in the live tail of the `.output` file. |
 | GET | `/api/scripts` | Script registry |
 | DELETE | `/api/runs/:id` | Delete a run record |
 | POST | `/api/runs/cleanup` | Delete runs older than N days. Body: `{ "days": 7 }` |
@@ -104,8 +104,11 @@ source /path/to/script-dashboard/lib/report.sh
 report_start "my-script" "scheduled"
 # ... your logic ...
 report_log "Key output line"
+report_progress "Phase 2: started"   # heartbeat — updates dashboard "last activity"
 report_end $?
 ```
+
+**`report_log` vs `report_progress`:** Both append to the captured output. `report_progress` also rewrites the running JSON with a `lastProgressAt` timestamp, which the dashboard uses to distinguish "running and making progress" from "running but stalled." Use it sparingly — for phase transitions, pass-rate updates, errors — not firehose output.
 
 ### Option 2: Wrap a command (one-liner)
 
@@ -119,6 +122,8 @@ report_exec "my-script" "scheduled" "Description here" -- your-command --with-ar
 - `scheduled` — Launchd agents (timer-based)
 - `meeting` — Recording/transcription pipeline
 - `manual` — On-demand (CLI, Raycast, Claude skills)
+- `skill` — Claude Code slash commands
+- `eval` — Local eval runs (long-running; use `report_progress` to surface heartbeat)
 
 ## Configuration
 

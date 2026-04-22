@@ -24,6 +24,8 @@ export interface RunRecord {
   artifacts?: Artifact[];
   reviewRequired?: boolean;
   reviewedAt?: string;
+  lastProgressAt?: string;
+  lastProgressMessage?: string;
 }
 
 export interface ArtifactDetail {

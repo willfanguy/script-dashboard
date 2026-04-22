@@ -200,6 +200,10 @@
     "skill": {
       "label": "Slash Commands",
       "description": "Claude Code skills and slash commands"
+    },
+    "eval": {
+      "label": "Evals",
+      "description": "Local eval runs (model/prompt regressions) — watch for progress, review results in your work thread"
     }
   }
 }
