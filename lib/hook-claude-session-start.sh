@@ -48,6 +48,35 @@ if [ -n "$source_kind" ] && [ "$source_kind" != "startup" ]; then
     desc="$desc (source: $source_kind)"
 fi
 
+# Append cmux workspace context if claude was invoked inside a cmux pane.
+# CMUX_WORKSPACE_ID propagates from the shell when claude started; cmux CLI
+# lets us resolve the UUID to the human-readable workspace name.
+if [ -n "${CMUX_WORKSPACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
+    # cmux validates CMUX_SURFACE_ID even on commands that don't need a
+    # surface (e.g., list-workspaces), so strip it before invoking. The
+    # selected workspace line is prefixed with `*`, which shifts column
+    # positions — find the UUID's field index, then read the name from the
+    # fields after it (stopping at any trailing [selected] marker).
+    workspace_name=$(env -u CMUX_SURFACE_ID cmux list-workspaces --id-format both 2>/dev/null \
+        | awk -v id="$CMUX_WORKSPACE_ID" '
+            index($0, id) {
+                for (i = 1; i <= NF; i++) {
+                    if ($i == id) {
+                        name = ""
+                        for (j = i + 1; j <= NF; j++) {
+                            if ($j == "[selected]") break
+                            name = name (name ? " " : "") $j
+                        }
+                        print name
+                        exit
+                    }
+                }
+            }')
+    if [ -n "$workspace_name" ]; then
+        desc="$desc [cmux: $workspace_name]"
+    fi
+fi
+
 # Open the dashboard record via the same script skills use. --category puts
 # this run under "interactive" instead of the default "skill" lane.
 script_dir="$(cd "$(dirname "$0")" && pwd)"
