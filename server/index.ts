@@ -12,6 +12,7 @@ import {
   readArtifact,
   resolveSafePath,
 } from "./artifacts.js";
+import { sweepStaleRunning } from "./stale-runs.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,6 +26,15 @@ const RUNS_DIR =
   path.join(os.homedir(), ".script-runs", "runs");
 
 const ARTIFACTS_CONFIG = loadArtifactsConfig();
+
+// Runs stuck in "running" past this window get marked killed by the periodic
+// sweep. Agents that legitimately need more than 30 min should emit
+// report_progress heartbeats — any heartbeat resets the idle clock.
+const STALE_RUN_THRESHOLD_MINUTES = parseInt(
+  process.env.STALE_RUN_THRESHOLD_MINUTES || "30",
+  10,
+);
+const STALE_RUN_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 app.use(cors());
 app.use(express.json());
@@ -211,6 +221,19 @@ app.post("/api/runs/cleanup", (req, res) => {
   res.json({ deleted, cutoffDays: days });
 });
 
+// POST /api/runs/sweep-stale — mark runs stuck in "running" past the threshold
+// as killed. Also runs on a timer and at server startup; this endpoint exists
+// so callers (CLI, tests) can force a sweep without waiting.
+app.post("/api/runs/sweep-stale", (_req, res) => {
+  const thresholdMs = STALE_RUN_THRESHOLD_MINUTES * 60 * 1000;
+  const result = sweepStaleRunning(RUNS_DIR, thresholdMs);
+  if (result.sweptIds.length > 0) broadcastUpdate();
+  res.json({
+    thresholdMinutes: STALE_RUN_THRESHOLD_MINUTES,
+    ...result,
+  });
+});
+
 // --- Review state mutation ---
 
 function readRunFile(id: string): RunRecord | null {
@@ -380,8 +403,27 @@ if (fs.existsSync(distDir)) {
   });
 }
 
+function runStaleSweep(): void {
+  const thresholdMs = STALE_RUN_THRESHOLD_MINUTES * 60 * 1000;
+  const { sweptIds } = sweepStaleRunning(RUNS_DIR, thresholdMs);
+  if (sweptIds.length > 0) {
+    console.log(
+      `[stale-sweep] marked ${sweptIds.length} run(s) killed:`,
+      sweptIds.join(", "),
+    );
+    broadcastUpdate();
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Script Dashboard API running on http://localhost:${PORT}`);
   console.log(`Reading runs from: ${RUNS_DIR}`);
   console.log(`SSE endpoint: http://localhost:${PORT}/api/events`);
+  console.log(
+    `Stale-run sweep: threshold=${STALE_RUN_THRESHOLD_MINUTES}min, interval=${
+      STALE_RUN_SWEEP_INTERVAL_MS / 1000
+    }s`,
+  );
+  runStaleSweep();
+  setInterval(runStaleSweep, STALE_RUN_SWEEP_INTERVAL_MS);
 });

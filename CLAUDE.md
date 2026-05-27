@@ -89,6 +89,7 @@ npm run test:watch   # Watch mode
 | GET | `/api/scripts` | Script registry |
 | DELETE | `/api/runs/:id` | Delete a run record |
 | POST | `/api/runs/cleanup` | Delete runs older than N days. Body: `{ "days": 7 }` |
+| POST | `/api/runs/sweep-stale` | Mark runs stuck in `running` past `STALE_RUN_THRESHOLD_MINUTES` (default 30) as `killed`. Runs automatically at startup and every 5 min; this endpoint forces an immediate sweep. |
 | POST | `/api/runs/:id/reviewed` | Mark a run as reviewed (sets `reviewedAt`) |
 | DELETE | `/api/runs/:id/reviewed` | Un-mark a run as reviewed |
 | GET | `/api/artifacts?path=X` | Read a markdown artifact (frontmatter + body). Path must be inside a configured root. |
@@ -147,6 +148,8 @@ bash ~/Repos/personal/script-dashboard/lib/report-skill-end.sh \
 On abort or error, pass `--exit-code 1` so the record shows `failed` instead of `success`.
 
 **One-shot alternative** (short-lived skills where mid-run visibility doesn't matter): `report-skill.sh` is still available. It calls both start and end back-to-back at the end of the work, which means `duration: 0` and no "running" card while the skill is working. Prefer the split pair for anything that takes more than a few seconds.
+
+**Orphan protection:** a skill that calls `report-skill-start.sh` but never `report-skill-end.sh` leaves the record in `"running"` forever. The server sweeps runs with no progress older than `STALE_RUN_THRESHOLD_MINUTES` (default 30 min) and marks them `killed`, so orphans don't pile up. For skills that legitimately exceed 30 min, emit `report_progress` heartbeats to reset the idle clock — though since `report.sh` can't be sourced in a subagent Bash call, heartbeat-from-subagent isn't possible today, and you should keep sub-30-min runs or extend the threshold.
 
 **Pair pattern (skill wraps agent):** when a slash-command skill invokes a subagent via the Agent tool, emit start/end from the **skill** only. The agent should NOT also call any `report-skill*` script — that would produce duplicate records with the same script name. Keep the agent silent to the dashboard; the skill owns the record.
 
