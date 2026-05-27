@@ -88,13 +88,20 @@ npm run test:watch   # Watch mode
 | GET | `/api/runs/:id` | Single run with full output. For running runs, stitches in the live tail of the `.output` file. |
 | GET | `/api/scripts` | Script registry |
 | DELETE | `/api/runs/:id` | Delete a run record |
-| POST | `/api/runs/cleanup` | Delete runs older than N days. Body: `{ "days": 7 }` |
+| POST | `/api/runs/cleanup` | Prune old runs. Body: `{ "completedDays": 7, "failedDays": 30 }` (defaults shown). `success` uses `completedDays`; `failed`/`killed` use `failedDays`; `running` is never touched. Legacy `{ "days": N }` applies to both. |
 | POST | `/api/runs/sweep-stale` | Mark runs stuck in `running` past `STALE_RUN_THRESHOLD_MINUTES` (default 30) as `killed`. Runs automatically at startup and every 5 min; this endpoint forces an immediate sweep. |
-| POST | `/api/runs/:id/reviewed` | Mark a run as reviewed (sets `reviewedAt`) |
-| DELETE | `/api/runs/:id/reviewed` | Un-mark a run as reviewed |
+| POST | `/api/runs/:id/reviewed` | Mark a run as reviewed (sets `reviewedAt`). Legacy bulk endpoint — the dashboard UI no longer calls it directly; the run-level `reviewedAt` is now derived automatically when all artifacts are marked reviewed. |
+| DELETE | `/api/runs/:id/reviewed` | Un-mark a run as reviewed. Legacy companion to the POST above. |
+| POST | `/api/runs/:id/artifacts/reviewed` | Body: `{ path }`. Mark a single artifact reviewed (sets `reviewedAt` on the artifact in the run record AND writes a `reviewed` entry to the suppression registry — see "Suppression registry" below). When ALL artifacts on the run have `reviewedAt`, the run's own `reviewedAt` is auto-set. |
+| DELETE | `/api/runs/:id/artifacts/reviewed` | Body: `{ path }`. Un-mark a single artifact reviewed. Also removes the suppression registry entry IF its reason was `reviewed` (un-marking never undoes an `archived` suppression). |
 | GET | `/api/artifacts?path=X` | Read a markdown artifact (frontmatter + body). Path must be inside a configured root. |
 | PATCH | `/api/artifacts?path=X` | Update frontmatter (`status`, `priority`) and/or append to `## Notes`. |
 | POST | `/api/artifacts/archive?path=X` | Move the artifact to its root's archive dir |
+| POST | `/api/artifacts/pull-jira?path=X` | Body: `{ jiraKey, field }`. Fetches `field` from JIRA and writes it into the local Task Note. When `field === "status"` the server runs the JIRA value through `lib/jira-status-mapping.json` and writes BOTH `status` (mapped to local taxonomy) AND `jiraStatus` (raw JIRA snapshot) atomically. Unknown JIRA states write `jiraStatus` only and return a `warning` field — never clobber the local taxonomy. Other fields (`jiraStatus`, `sprint`, `jiraLabels`, `assignee`) write verbatim. 503 if no `jira` block in server config. |
+| GET | `/api/jira/status-mapping` | Returns the canonical JIRA → local-status map as `{ mappings: { normalizedJiraKey: localStatus } }`. Used by the UI to preview the mapped value in the "JIRA wins" button label. |
+| POST | `/api/artifacts/snooze?path=X` | Body: `{ untilDate: "YYYY-MM-DD" }`. Adds `sync-mute-until` frontmatter — todo-sync skips snoozed notes until the date. |
+| GET | `/api/jira/:key/transitions` | List the workflow transitions currently valid for the JIRA issue. Returns `{ transitions: [{ id, name, toStatus }] }`. Used to build the "Push to JIRA" dropdown. |
+| POST | `/api/jira/:key/transition` | Body: `{ transitionId }`. Applies a workflow transition. Returns the updated issue summary. |
 
 ## Integrating a Script
 
@@ -192,6 +199,80 @@ If `artifactRoots` is empty or the file is missing, artifact endpoints return `5
 ## Review workflow
 
 Scripts that create files you want to review later can flag their run with `report_review_required` and emit artifact links with `report_artifact TYPE LABEL PATH` (or `--review` / `--artifact TYPE LABEL PATH` when using `report-skill.sh`). The dashboard surfaces those runs in a "Needs Review" badge and renders each artifact inline with editable status/priority, a notes-append field, and an archive button. All edits go straight to the file on disk — the vault stays the source of truth.
+
+### Reconciliation decisions (todo-sync-style agents)
+
+Agents that detect conflicts between local state and an external source (todo-sync between Task Notes and JIRA) can attach a `decision` block to each artifact. The dashboard reads it and renders kind-specific buttons.
+
+**How to emit:** the agent writes a JSON file mapping artifact path → decision metadata, then passes it to `report-skill-end.sh --decisions-file PATH`.
+
+```json
+{
+  "/abs/path/Tasks/SM-609.md": {
+    "kind": "status-divergence",
+    "jiraKey": "SM-609",
+    "jiraStatus": "In Progress",
+    "localStatus": "blocked",
+    "note": "optional free text"
+  }
+}
+```
+
+**Kinds and what buttons they unlock:**
+
+| `kind` | Buttons in the dashboard |
+|---|---|
+| `status-divergence` | JIRA wins (pull) • Push to JIRA (transition dropdown) |
+| `local-ahead-of-jira` | Push to JIRA (transition dropdown) |
+| `backlog-stale` | Snooze 30 days • Snooze 90 days |
+| `local-done-jira-open` | Push to JIRA (transition dropdown, typically to Done) |
+| `jira-now-done` | JIRA wins (pull) |
+
+All kinds also retain the default Status/Priority/Notes/Archive controls.
+
+Successful actions auto-archive the artifact card so the review queue clears one decision at a time. The Snooze actions write a `sync-mute-until: YYYY-MM-DD` frontmatter field that the agent should respect on subsequent runs.
+
+## Suppression registry
+
+Reviewed and archived artifacts are tracked in `~/.script-runs/.suppressed.json` so they don't reappear on every subsequent agent rerun.
+
+**Schema** — single JSON object keyed by absolute artifact path:
+
+```json
+{
+  "/abs/path/to/file.md": {
+    "reason": "reviewed" | "archived",
+    "suppressedAt": "ISO_TIMESTAMP",
+    "viaScript": "todo-sync",
+    "viaRunId": "todo-sync-2026-05-12T21-48-31Z-16303"
+  }
+}
+```
+
+(`viaScript` / `viaRunId` are omitted for archive entries, since the archive endpoint doesn't know which run/script the artifact came from.)
+
+**Write path:**
+
+- `POST /api/runs/:id/artifacts/reviewed` writes `reason: "reviewed"`.
+- `POST /api/artifacts/archive` writes `reason: "archived"` for BOTH the original pre-move path AND the new `Archive/` path, because agents like todo-sync's Phase 1.5 scan the archive folder and would otherwise re-emit the moved file under its new path.
+- `DELETE /api/runs/:id/artifacts/reviewed` removes the entry IFF its reason is `reviewed`. Un-marking reviewed must not undo an archive.
+
+**Filter rule (server-side, applied in `GET /api/runs` and `GET /api/runs/:id`):**
+
+```
+drop artifact iff (path in registry) AND (artifact has no reviewedAt on this run record)
+```
+
+The asymmetry matters. The path appears in the registry only after the user marked it reviewed somewhere. That "somewhere" is a specific run record where the artifact's `reviewedAt` was also written. On that source run, the filter sees `reviewedAt` set and KEEPS the artifact visible — so the collapsed "Reviewed Xm ago" stub stays reachable and the user can undo. On any OTHER run record that emits the same path (a fresh agent run), the path-in-registry condition fires AND the artifact lacks `reviewedAt`, so it gets stripped from the response. Archived items always lack `reviewedAt` on every run, so they're filtered universally — that's intended (archive has no undo).
+
+**Cross-script semantics:** The registry is keyed purely by path. If you reviewed an item via todo-sync, a different agent (slack-saved-sync, meeting-tasks-extractor) that later emits the same path will also have it filtered. This is intentional — same file → same suppression. If you find a case where you want one agent's surface to ignore another agent's suppression, revisit the schema (likely needs `(viaScript, path)` keying).
+
+### Known trade-offs (revisit if any of these actually bite)
+
+1. **No state-change re-surfacing.** A `status-divergence` reviewed today stays muted even if JIRA later moves to a new state. The follow-up path is a "state-snapshot" flavor: store the `(jiraStatus, localStatus)` tuple at review time and re-surface only when either value changes. About 3 hours of work, would replace the `SuppressionEntry` schema with a versioned form. Skipped because indefinite-mute solves the immediate pain.
+2. **No inspection UI.** The registry is invisible by design — most of the time it should be. Inspect via `cat ~/.script-runs/.suppressed.json | jq` if needed. Build a panel if it becomes useful.
+3. **Cross-script suppression is global.** Documented above. If this becomes wrong, switch to `(viaScript, path)` keying.
+4. **No auto-expiry.** Entries live forever unless un-marked. A path that disappears from the filesystem (e.g., user manually deletes a Task Note) leaves a stale registry entry. Harmless — the entry just doesn't match anything. A periodic cleanup pass could drop entries whose path no longer exists; not built.
 
 ## Public Repo Notes
 

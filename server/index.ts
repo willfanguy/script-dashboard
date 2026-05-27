@@ -7,11 +7,20 @@ import { fileURLToPath } from "url";
 import {
   ArtifactError,
   archiveArtifact,
+  isJiraPullableField,
   loadArtifactsConfig,
   patchArtifact,
   readArtifact,
   resolveSafePath,
+  setArtifactField,
+  setArtifactFields,
+  snoozeArtifact,
 } from "./artifacts.js";
+import { createJiraClient, JiraError, type JiraClient } from "./jira.js";
+import {
+  jiraToLocalStatus,
+  loadStatusMapping,
+} from "./jira-status-mapping.js";
 import { sweepStaleRunning } from "./stale-runs.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -25,7 +34,100 @@ const RUNS_DIR =
   process.env.SCRIPT_RUNS_DIR ||
   path.join(os.homedir(), ".script-runs", "runs");
 
+// Suppression registry — paths in this file are filtered out of every GET so
+// reviewed / archived items don't keep reappearing in the review queue on each
+// agent rerun. Indefinite mute keyed by absolute artifact path; un-mark
+// reviewed via the dashboard removes the entry.
+const SUPPRESSED_FILE =
+  process.env.SCRIPT_SUPPRESSED_FILE ||
+  path.join(path.dirname(RUNS_DIR), ".suppressed.json");
+
+interface SuppressionEntry {
+  reason: "reviewed" | "archived";
+  suppressedAt: string;
+  viaScript?: string;
+  viaRunId?: string;
+}
+
+type SuppressionRegistry = Record<string, SuppressionEntry>;
+
+function readSuppressed(): SuppressionRegistry {
+  if (!fs.existsSync(SUPPRESSED_FILE)) return {};
+  try {
+    const raw = fs.readFileSync(SUPPRESSED_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSuppressed(reg: SuppressionRegistry): void {
+  const dir = path.dirname(SUPPRESSED_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const tmp = `${SUPPRESSED_FILE}.tmp.${process.pid}.${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(reg, null, 2), "utf-8");
+  fs.renameSync(tmp, SUPPRESSED_FILE);
+}
+
+function addSuppression(
+  artifactPath: string,
+  entry: SuppressionEntry,
+): void {
+  const reg = readSuppressed();
+  reg[artifactPath] = entry;
+  writeSuppressed(reg);
+}
+
+function removeSuppression(artifactPath: string): void {
+  const reg = readSuppressed();
+  if (!(artifactPath in reg)) return;
+  delete reg[artifactPath];
+  writeSuppressed(reg);
+}
+
+// Apply the suppression filter to a run record's artifacts in place. Returns
+// the number of artifacts dropped so callers can log/expose if desired.
+//
+// Filter rule: drop artifacts whose path is in the registry AND which lack a
+// reviewedAt timestamp on this run record. This keeps the SOURCE run's
+// reviewed stub visible (so the user can undo) while suppressing the same
+// path's reappearance on every NEW run that emits it. Archived artifacts
+// always have no reviewedAt, so they're stripped cleanly on next refresh.
+//
+// Also virtually clears reviewedAt on the RUN record when every surviving
+// (post-filter) artifact is reviewed. Without this, a run whose unreviewed
+// artifacts all got suppression-filtered (because they were reviewed or
+// archived on a different run) would stay in the Needs Review queue forever
+// — the on-disk rollup in POST /artifacts/reviewed operates on the unfiltered
+// list and never fires. This projection is read-time only; the persisted
+// record is unchanged.
+function applySuppressionFilter(
+  record: RunRecord,
+  registry: SuppressionRegistry,
+): number {
+  if (!record.artifacts || record.artifacts.length === 0) return 0;
+  const before = record.artifacts.length;
+  record.artifacts = record.artifacts.filter(
+    (a) => !(a.path in registry) || !!a.reviewedAt,
+  );
+  if (
+    record.reviewRequired &&
+    !record.reviewedAt &&
+    record.artifacts.every((a) => !!a.reviewedAt)
+  ) {
+    record.reviewedAt = new Date().toISOString();
+  }
+  return before - record.artifacts.length;
+}
+
 const ARTIFACTS_CONFIG = loadArtifactsConfig();
+const JIRA: JiraClient | null = ARTIFACTS_CONFIG.jira
+  ? createJiraClient(ARTIFACTS_CONFIG.jira)
+  : null;
+const STATUS_MAPPING = loadStatusMapping();
+// Issue keys look like ABC-123. Constrain before they reach JIRA / URL builders.
+const JIRA_KEY_PATTERN = /^[A-Z][A-Z0-9_]+-\d+$/;
 
 // Runs stuck in "running" past this window get marked killed by the periodic
 // sweep. Agents that legitimately need more than 30 min should emit
@@ -51,10 +153,28 @@ app.param("id", (_req, res, next, id) => {
   next();
 });
 
+// Structured metadata attached to an artifact by the emitting agent. Drives
+// the conditional buttons in the dashboard's review panel. Optional — agents
+// that don't emit decisions render with the default edit/archive buttons.
+interface ArtifactDecision {
+  kind:
+    | "status-divergence"      // JIRA + local disagree on status
+    | "local-ahead-of-jira"    // local is in-progress/done but JIRA is behind
+    | "backlog-stale"          // backlog + no sprint + no due date
+    | "local-done-jira-open"   // done locally but JIRA isn't closed
+    | "jira-now-done";         // JIRA closed but local still open
+  jiraKey: string;
+  jiraStatus?: string;
+  localStatus?: string;
+  note?: string;               // free-form context for the dashboard card
+}
+
 interface Artifact {
   type: "task-note" | "file" | "url";
   label: string;
   path: string;
+  decision?: ArtifactDecision;
+  reviewedAt?: string;
 }
 
 interface RunRecord {
@@ -115,6 +235,14 @@ app.get("/api/runs", (_req, res) => {
     runs = runs.filter((r) => r.category === category);
   }
 
+  // Drop suppressed artifacts so reviewed / archived items don't reappear on
+  // subsequent agent runs. Filter is applied per-record so an empty artifact
+  // list still surfaces the run itself (the user may want to see the summary).
+  const suppressed = readSuppressed();
+  for (const r of runs) {
+    applySuppressionFilter(r, suppressed);
+  }
+
   // Strip output from list view to keep the response lean
   const summary = runs.slice(0, limit).map(({ output: _output, ...rest }) => rest);
   res.json(summary);
@@ -160,6 +288,7 @@ app.get("/api/runs/:id", (req, res) => {
       const live = readLiveOutputTail(req.params.id);
       if (live !== null) record.output = live;
     }
+    applySuppressionFilter(record, readSuppressed());
     res.json(record);
   } catch {
     res.status(500).json({ error: "Failed to read run record" });
@@ -196,29 +325,66 @@ app.delete("/api/runs/:id", (req, res) => {
   }
 });
 
-// POST /api/runs/cleanup — delete runs older than N days
+// POST /api/runs/cleanup — delete old runs.
+// Body: { completedDays?: number, failedDays?: number, days?: number }
+//   - success runs older than completedDays are pruned
+//   - failed/killed runs older than failedDays are pruned
+//   - running runs are never touched
+//   - `days` is a legacy alias that applies to both when the specific fields are absent
 app.post("/api/runs/cleanup", (req, res) => {
-  const days = parseInt(req.body.days || "7", 10);
-  const cutoff = Date.now() / 1000 - days * 86400;
+  const body = (req.body ?? {}) as {
+    days?: number | string;
+    completedDays?: number | string;
+    failedDays?: number | string;
+  };
+  const legacyDays = body.days != null ? Number(body.days) : undefined;
+  const completedDays = Number(body.completedDays ?? legacyDays ?? 7);
+  const failedDays = Number(body.failedDays ?? legacyDays ?? 30);
+
+  if (
+    !Number.isFinite(completedDays) ||
+    !Number.isFinite(failedDays) ||
+    completedDays < 0 ||
+    failedDays < 0
+  ) {
+    res.status(400).json({
+      error: "completedDays and failedDays must be non-negative numbers",
+    });
+    return;
+  }
+
+  const now = Date.now() / 1000;
+  const completedCutoff = now - completedDays * 86400;
+  const failedCutoff = now - failedDays * 86400;
 
   const runs = readRunFiles();
-  let deleted = 0;
+  let deletedCompleted = 0;
+  let deletedFailed = 0;
 
   for (const run of runs) {
-    if (run.startEpoch < cutoff && run.status !== "running") {
-      const runFile = path.join(RUNS_DIR, `${run.id}.json`);
-      const outputFile = path.join(RUNS_DIR, `${run.id}.output`);
-      try {
-        fs.unlinkSync(runFile);
-        if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
-        deleted++;
-      } catch {
-        // Skip files that can't be deleted
-      }
+    if (run.status === "running") continue;
+    const cutoff = run.status === "success" ? completedCutoff : failedCutoff;
+    if (run.startEpoch >= cutoff) continue;
+
+    const runFile = path.join(RUNS_DIR, `${run.id}.json`);
+    const outputFile = path.join(RUNS_DIR, `${run.id}.output`);
+    try {
+      fs.unlinkSync(runFile);
+      if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
+      if (run.status === "success") deletedCompleted++;
+      else deletedFailed++;
+    } catch {
+      // Skip files that can't be deleted
     }
   }
 
-  res.json({ deleted, cutoffDays: days });
+  res.json({
+    deleted: deletedCompleted + deletedFailed,
+    deletedCompleted,
+    deletedFailed,
+    completedDays,
+    failedDays,
+  });
 });
 
 // POST /api/runs/sweep-stale — mark runs stuck in "running" past the threshold
@@ -286,6 +452,105 @@ app.delete("/api/runs/:id/reviewed", (req, res) => {
   }
 });
 
+// Per-artifact reviewed state. The run is implicitly marked reviewed when ALL
+// its artifacts have a reviewedAt timestamp, so the Needs Review queue still
+// clears even without the legacy run-level button.
+app.post("/api/runs/:id/artifacts/reviewed", (req, res) => {
+  const targetPath =
+    typeof req.body?.path === "string" ? req.body.path : null;
+  if (!targetPath) {
+    res.status(400).json({ error: "Missing artifact path in body" });
+    return;
+  }
+  const record = readRunFile(req.params.id);
+  if (!record) {
+    res.status(404).json({ error: "Run not found" });
+    return;
+  }
+  const artifacts = record.artifacts ?? [];
+  const target = artifacts.find((a) => a.path === targetPath);
+  if (!target) {
+    res.status(404).json({ error: "Artifact not found on run" });
+    return;
+  }
+  target.reviewedAt = new Date().toISOString();
+
+  // Rollup uses the SAME visible-to-user view that applySuppressionFilter
+  // computes at read time. Artifacts whose paths are already in the
+  // suppression registry (archived or reviewed-via-another-run) don't appear
+  // in the dashboard, so they must not block the run from clearing.
+  const suppressed = readSuppressed();
+  const visible = artifacts.filter(
+    (a) => !(a.path in suppressed) || !!a.reviewedAt,
+  );
+  if (
+    visible.length > 0 &&
+    visible.every((a) => !!a.reviewedAt) &&
+    !record.reviewedAt
+  ) {
+    record.reviewedAt = target.reviewedAt;
+  }
+
+  try {
+    writeRunFileAtomic(req.params.id, record);
+    addSuppression(target.path, {
+      reason: "reviewed",
+      suppressedAt: target.reviewedAt,
+      viaScript: record.script,
+      viaRunId: record.id,
+    });
+    res.json({ artifact: target, run: record });
+  } catch (err) {
+    console.error(
+      `[artifact-reviewed] failed to write run ${req.params.id}:`,
+      err,
+    );
+    res.status(500).json({ error: "Failed to write run record" });
+  }
+});
+
+app.delete("/api/runs/:id/artifacts/reviewed", (req, res) => {
+  const targetPath =
+    typeof req.body?.path === "string" ? req.body.path : null;
+  if (!targetPath) {
+    res.status(400).json({ error: "Missing artifact path in body" });
+    return;
+  }
+  const record = readRunFile(req.params.id);
+  if (!record) {
+    res.status(404).json({ error: "Run not found" });
+    return;
+  }
+  const artifacts = record.artifacts ?? [];
+  const target = artifacts.find((a) => a.path === targetPath);
+  if (!target) {
+    res.status(404).json({ error: "Artifact not found on run" });
+    return;
+  }
+  delete target.reviewedAt;
+
+  if (record.reviewedAt && artifacts.some((a) => !a.reviewedAt)) {
+    delete record.reviewedAt;
+  }
+
+  try {
+    writeRunFileAtomic(req.params.id, record);
+    // Only clear suppression if the registry entry came from a "reviewed"
+    // action — un-marking reviewed shouldn't undo an "archived" suppression.
+    const reg = readSuppressed();
+    if (reg[target.path]?.reason === "reviewed") {
+      removeSuppression(target.path);
+    }
+    res.json({ artifact: target, run: record });
+  } catch (err) {
+    console.error(
+      `[artifact-unreviewed] failed to write run ${req.params.id}:`,
+      err,
+    );
+    res.status(500).json({ error: "Failed to write run record" });
+  }
+});
+
 // --- Artifact endpoints ---
 
 function handleArtifactError(
@@ -343,8 +608,219 @@ app.post("/api/artifacts/archive", (req, res) => {
       ARTIFACTS_CONFIG,
     );
     const result = archiveArtifact(absPath, root);
+    // Suppress BOTH the original and post-archive paths. Original handles
+    // run records that still reference the pre-archive location; new handles
+    // agents (like todo-sync Phase 1.5) that scan the archive folder and
+    // would otherwise re-emit the moved file under its new path.
+    const now = new Date().toISOString();
+    addSuppression(result.originalPath, {
+      reason: "archived",
+      suppressedAt: now,
+    });
+    if (result.newPath !== result.originalPath) {
+      addSuppression(result.newPath, {
+        reason: "archived",
+        suppressedAt: now,
+      });
+    }
     res.json(result);
     // Inform any listening clients so the artifact disappears from the UI.
+    broadcastUpdate();
+  } catch (err) {
+    handleArtifactError(err, res);
+  }
+});
+
+// --- JIRA reconciliation endpoints ---
+
+function handleJiraError(
+  err: unknown,
+  res: import("express").Response,
+): void {
+  if (err instanceof JiraError) {
+    res.status(err.status).json({ error: err.message, detail: err.detail });
+    return;
+  }
+  console.error("[jira] internal error:", err);
+  res.status(500).json({
+    error: "Internal error",
+    detail: err instanceof Error ? err.message : String(err),
+  });
+}
+
+function requireJira(res: import("express").Response): JiraClient | null {
+  if (!JIRA) {
+    res
+      .status(503)
+      .json({ error: "JIRA integration is not configured on this server." });
+    return null;
+  }
+  return JIRA;
+}
+
+function validJiraKey(
+  key: string,
+  res: import("express").Response,
+): boolean {
+  if (!JIRA_KEY_PATTERN.test(key)) {
+    res.status(400).json({ error: "Invalid JIRA key" });
+    return false;
+  }
+  return true;
+}
+
+// GET /api/jira/:key/transitions — list the workflow transitions currently
+// valid for this issue. Powers the "Local wins → push to JIRA" status
+// dropdown. Returns `[{ id, name, toStatus }]`.
+app.get("/api/jira/:key/transitions", async (req, res) => {
+  const jira = requireJira(res);
+  if (!jira) return;
+  if (!validJiraKey(req.params.key, res)) return;
+  try {
+    const transitions = await jira.listTransitions(req.params.key);
+    res.json({ key: req.params.key, transitions });
+  } catch (err) {
+    handleJiraError(err, res);
+  }
+});
+
+// POST /api/jira/:key/transition — apply a workflow transition by id.
+// Body: `{ transitionId: "21" }`. The id comes from the transitions list above.
+app.post("/api/jira/:key/transition", async (req, res) => {
+  const jira = requireJira(res);
+  if (!jira) return;
+  if (!validJiraKey(req.params.key, res)) return;
+  const body = (req.body ?? {}) as { transitionId?: unknown };
+  if (typeof body.transitionId !== "string" || body.transitionId.length === 0) {
+    res.status(400).json({ error: "transitionId (string) is required" });
+    return;
+  }
+  try {
+    await jira.transitionIssue(req.params.key, body.transitionId);
+    // getIssue already includes the key in its result.
+    const summary = await jira.getIssue(req.params.key);
+    res.json(summary);
+  } catch (err) {
+    handleJiraError(err, res);
+  }
+});
+
+// POST /api/artifacts/pull-jira?path=...
+// Body: `{ jiraKey: "SM-609", field: "status" }`.
+// Fetches the current value from JIRA and writes it into the local Task Note.
+// `field` is constrained to the JIRA_PULLABLE_FIELDS allowlist.
+app.post("/api/artifacts/pull-jira", async (req, res) => {
+  const jira = requireJira(res);
+  if (!jira) return;
+  try {
+    const { absPath } = resolveSafePath(
+      (req.query.path as string) ?? "",
+      ARTIFACTS_CONFIG,
+    );
+    const body = (req.body ?? {}) as {
+      jiraKey?: unknown;
+      field?: unknown;
+    };
+    if (typeof body.jiraKey !== "string" || !JIRA_KEY_PATTERN.test(body.jiraKey)) {
+      res.status(400).json({ error: "jiraKey is required and must look like ABC-123" });
+      return;
+    }
+    if (typeof body.field !== "string" || !isJiraPullableField(body.field)) {
+      res.status(400).json({
+        error:
+          "field must be one of: status, jiraStatus, sprint, jiraLabels, assignee",
+      });
+      return;
+    }
+    const summary = await jira.getIssue(body.jiraKey);
+
+    // Two write modes:
+    //
+    // - `status`: this is the local-taxonomy field (lowercase, hyphen-
+    //   separated, drives Dataview + the Task Notes plugin). We MUST run the
+    //   JIRA status through the canonical mapping before writing, otherwise
+    //   we'd inject JIRA's title-case "In Progress" into a field that's
+    //   supposed to hold "in-progress". We also refresh `jiraStatus` with
+    //   the raw JIRA value in the same write so the two stay in sync.
+    //
+    // - `jiraStatus`: snapshot field. Always raw JIRA text. No mapping.
+    //
+    // - everything else (sprint, labels, assignee): write verbatim.
+    let updated;
+    let mappingWarning: string | null = null;
+
+    if (body.field === "status") {
+      const localStatus = jiraToLocalStatus(summary.status, STATUS_MAPPING);
+      if (localStatus === null) {
+        // Unmappable: write the snapshot only, leave local `status` alone.
+        // The dashboard will surface the warning so Will can decide manually.
+        updated = setArtifactField(absPath, "jiraStatus", summary.status);
+        mappingWarning = `No local mapping for JIRA status "${summary.status}". Updated jiraStatus snapshot; local status field left unchanged.`;
+      } else {
+        updated = setArtifactFields(absPath, {
+          status: localStatus,
+          jiraStatus: summary.status,
+        });
+      }
+    } else if (body.field === "jiraStatus") {
+      updated = setArtifactField(absPath, "jiraStatus", summary.status);
+    } else {
+      let value: unknown;
+      switch (body.field) {
+        case "sprint":
+          value = summary.sprint ?? null;
+          break;
+        case "jiraLabels":
+          value = summary.labels;
+          break;
+        case "assignee":
+          value = summary.assignee ?? null;
+          break;
+      }
+      updated = setArtifactField(absPath, body.field, value);
+    }
+    res.json({
+      jira: summary,
+      artifact: updated,
+      ...(mappingWarning ? { warning: mappingWarning } : {}),
+    });
+    broadcastUpdate();
+  } catch (err) {
+    if (err instanceof ArtifactError) {
+      handleArtifactError(err, res);
+      return;
+    }
+    handleJiraError(err, res);
+  }
+});
+
+// GET /api/jira/status-mapping — returns the canonical JIRA → local status
+// map so the UI can preview the mapped value (e.g., "JIRA wins → in-progress")
+// before the user clicks. Static at runtime — file is read once at startup.
+app.get("/api/jira/status-mapping", (_req, res) => {
+  // Serialize the Map as a plain object: { normalizedJiraKey: localStatus }.
+  // Callers do their own normalization on the JIRA name before lookup.
+  const entries: Record<string, string> = {};
+  for (const [k, v] of STATUS_MAPPING.lookup) entries[k] = v;
+  res.json({ mappings: entries });
+});
+
+// POST /api/artifacts/snooze?path=...
+// Body: `{ untilDate: "2026-06-01" }`. Adds `sync-mute-until` so the next
+// todo-sync run skips this note until the date passes.
+app.post("/api/artifacts/snooze", (req, res) => {
+  try {
+    const { absPath } = resolveSafePath(
+      (req.query.path as string) ?? "",
+      ARTIFACTS_CONFIG,
+    );
+    const body = (req.body ?? {}) as { untilDate?: unknown };
+    if (typeof body.untilDate !== "string") {
+      res.status(400).json({ error: "untilDate (YYYY-MM-DD) is required" });
+      return;
+    }
+    const updated = snoozeArtifact(absPath, body.untilDate);
+    res.json(updated);
     broadcastUpdate();
   } catch (err) {
     handleArtifactError(err, res);

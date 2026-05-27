@@ -86,10 +86,10 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
 
   if (view === "review") {
     // Review queue: runs flagged reviewRequired that haven't been reviewed yet,
-    // oldest first — handle the older ones before they get buried.
+    // newest first — matches the chronological view's ordering convention.
     const queue = runs
       .filter((r) => r.reviewRequired && !r.reviewedAt)
-      .sort((a, b) => (a.startEpoch || 0) - (b.startEpoch || 0));
+      .sort((a, b) => (b.startEpoch || 0) - (a.startEpoch || 0));
 
     if (queue.length === 0) {
       return (

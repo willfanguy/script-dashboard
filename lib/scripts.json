@@ -64,6 +64,13 @@
       "schedule": "persistent (run at load)"
     },
     {
+      "id": "cleanup-runs",
+      "name": "Cleanup Runs",
+      "category": "scheduled",
+      "description": "Prune run records (success after 7d, failed/killed after 30d)",
+      "schedule": "3:15 AM daily"
+    },
+    {
       "id": "meeting-start",
       "name": "Meeting Start",
       "category": "meeting",
@@ -164,6 +171,18 @@
       "name": "Commit Push MR",
       "category": "skill",
       "description": "Commit, push, and open a GitLab MR"
+    },
+    {
+      "id": "mr-ready",
+      "name": "MR Ready",
+      "category": "skill",
+      "description": "Promote MR draft → ready, post eval comment, update JIRA + task notes, prep Slack message"
+    },
+    {
+      "id": "coderabbit-check",
+      "name": "CodeRabbit Follow-up",
+      "category": "skill",
+      "description": "Background poller for CodeRabbit review on a recently-promoted MR. Spawned by /mr-ready."
     },
     {
       "id": "commit-push-pr",

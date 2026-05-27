@@ -1,9 +1,35 @@
-export type ArtifactType = "task-note" | "file" | "url";
+export type ArtifactType = "task-note" | "markdown" | "file" | "url";
+
+// Reconciliation context attached by todo-sync (and any future agent that
+// produces decisions vs. just new artifacts). Drives the conditional action
+// buttons in ArtifactReview.
+export type ArtifactDecisionKind =
+  | "status-divergence"
+  | "local-ahead-of-jira"
+  | "backlog-stale"
+  | "local-done-jira-open"
+  | "jira-now-done";
+
+export interface ArtifactDecision {
+  kind: ArtifactDecisionKind;
+  jiraKey: string;
+  jiraStatus?: string;
+  localStatus?: string;
+  note?: string;
+}
 
 export interface Artifact {
   type: ArtifactType;
   label: string;
   path: string;
+  decision?: ArtifactDecision;
+  reviewedAt?: string;
+}
+
+export interface JiraTransition {
+  id: string;
+  name: string;
+  toStatus: string;
 }
 
 export interface RunRecord {

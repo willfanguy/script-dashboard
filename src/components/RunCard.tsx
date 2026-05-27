@@ -23,16 +23,10 @@ import {
   Skull,
   ChevronRight,
   Clock,
-  Check,
-  RotateCcw,
   Archive,
 } from "lucide-react";
 import { ArtifactReview } from "@/components/ArtifactReview";
-import {
-  archiveArtifact,
-  markRunReviewed,
-  unmarkRunReviewed,
-} from "@/lib/artifacts-api";
+import { archiveArtifact } from "@/lib/artifacts-api";
 
 interface RunCardProps {
   run: RunRecord;
@@ -124,32 +118,6 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
   const runningElapsed = isRunning ? elapsedSeconds(run.startedAt) : null;
   const progress = progressState(run.lastProgressAt);
   const showStallBorder = isRunning && progress === "stalled";
-
-  const handleMarkReviewed = async () => {
-    setReviewBusy(true);
-    setReviewError(null);
-    try {
-      const updated = await markRunReviewed(run.id);
-      setReviewedAt(updated.reviewedAt);
-    } catch (err) {
-      setReviewError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setReviewBusy(false);
-    }
-  };
-
-  const handleUnmarkReviewed = async () => {
-    setReviewBusy(true);
-    setReviewError(null);
-    try {
-      await unmarkRunReviewed(run.id);
-      setReviewedAt(undefined);
-    } catch (err) {
-      setReviewError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setReviewBusy(false);
-    }
-  };
 
   const archivableArtifacts = artifacts.filter((a) => a.type === "task-note");
 
@@ -324,29 +292,10 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
                         Archive all
                       </button>
                     )}
-                    {run.reviewRequired && !reviewedAt && (
-                      <button
-                        onClick={handleMarkReviewed}
-                        disabled={reviewBusy}
-                        className="text-xs flex items-center gap-1.5 px-3 py-1 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-                      >
-                        <Check className="h-3 w-3" />
-                        Mark reviewed
-                      </button>
-                    )}
                     {reviewedAt && (
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <span>Reviewed {timeAgo(reviewedAt)}</span>
-                        <button
-                          onClick={handleUnmarkReviewed}
-                          disabled={reviewBusy}
-                          className="flex items-center gap-1 hover:text-foreground"
-                          title="Un-mark reviewed"
-                        >
-                          <RotateCcw className="h-3 w-3" />
-                          undo
-                        </button>
-                      </div>
+                      <span className="text-xs text-muted-foreground">
+                        All reviewed {timeAgo(reviewedAt)}
+                      </span>
                     )}
                   </div>
                 </div>
@@ -363,6 +312,7 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
                       <ArtifactReview
                         key={`${a.type}:${a.path}`}
                         artifact={a}
+                        runId={run.id}
                         onArchived={(archived) =>
                           setArtifacts((prev) =>
                             prev.filter(
@@ -374,6 +324,32 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
                             ),
                           )
                         }
+                        onReviewedChange={(updated) => {
+                          setArtifacts((prev) =>
+                            prev.map((x) =>
+                              x.type === updated.type &&
+                              x.path === updated.path
+                                ? { ...x, reviewedAt: updated.reviewedAt }
+                                : x,
+                            ),
+                          );
+                          const remaining = artifacts.filter(
+                            (x) =>
+                              !(
+                                x.type === updated.type &&
+                                x.path === updated.path
+                              ),
+                          );
+                          const allReviewed =
+                            updated.reviewedAt &&
+                            remaining.every((x) => !!x.reviewedAt);
+                          if (allReviewed && !reviewedAt) {
+                            setReviewedAt(updated.reviewedAt);
+                          }
+                          if (!updated.reviewedAt && reviewedAt) {
+                            setReviewedAt(undefined);
+                          }
+                        }}
                       />
                     ))}
                   </div>

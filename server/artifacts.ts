@@ -23,8 +23,15 @@ export interface ArtifactRoot {
   archive: string; // absolute path; archive target for files under root
 }
 
+export interface JiraConfig {
+  baseUrl: string;   // e.g. "https://glassdoor.atlassian.net"
+  username: string;  // Atlassian account email
+  apiToken: string;  // PAT from id.atlassian.com
+}
+
 export interface ArtifactsConfig {
   artifactRoots: ArtifactRoot[];
+  jira?: JiraConfig;
 }
 
 export interface ArtifactDetail {
@@ -37,6 +44,22 @@ export interface ArtifactPatchInput {
   status?: string;
   priority?: string;
   appendNote?: string;
+}
+
+// Frontmatter fields the dashboard is allowed to overwrite with values pulled
+// from JIRA. Keep this list explicit — we never want to clobber free-text
+// fields like `description` or `tags` from a remote source.
+const JIRA_PULLABLE_FIELDS = [
+  "status",
+  "jiraStatus",
+  "sprint",
+  "jiraLabels",
+  "assignee",
+] as const;
+export type JiraPullableField = (typeof JIRA_PULLABLE_FIELDS)[number];
+
+export function isJiraPullableField(value: string): value is JiraPullableField {
+  return (JIRA_PULLABLE_FIELDS as readonly string[]).includes(value);
 }
 
 const DEFAULT_CONFIG_PATH = path.join(
@@ -67,19 +90,47 @@ export function loadArtifactsConfig(
 
   if (!parsed || typeof parsed !== "object") return { artifactRoots: [] };
   const maybeRoots = (parsed as { artifactRoots?: unknown }).artifactRoots;
-  if (!Array.isArray(maybeRoots)) return { artifactRoots: [] };
-
   const artifactRoots: ArtifactRoot[] = [];
-  for (const entry of maybeRoots) {
-    if (!entry || typeof entry !== "object") continue;
-    const { root, archive } = entry as { root?: unknown; archive?: unknown };
-    if (typeof root !== "string" || typeof archive !== "string") continue;
-    artifactRoots.push({
-      root: path.resolve(root),
-      archive: path.resolve(archive),
-    });
+  if (Array.isArray(maybeRoots)) {
+    for (const entry of maybeRoots) {
+      if (!entry || typeof entry !== "object") continue;
+      const { root, archive } = entry as {
+        root?: unknown;
+        archive?: unknown;
+      };
+      if (typeof root !== "string" || typeof archive !== "string") continue;
+      artifactRoots.push({
+        root: path.resolve(root),
+        archive: path.resolve(archive),
+      });
+    }
   }
-  return { artifactRoots };
+
+  const jira = parseJiraBlock((parsed as { jira?: unknown }).jira);
+  return jira ? { artifactRoots, jira } : { artifactRoots };
+}
+
+function parseJiraBlock(value: unknown): JiraConfig | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { baseUrl, username, apiToken } = value as {
+    baseUrl?: unknown;
+    username?: unknown;
+    apiToken?: unknown;
+  };
+  if (
+    typeof baseUrl !== "string" ||
+    typeof username !== "string" ||
+    typeof apiToken !== "string"
+  ) {
+    return undefined;
+  }
+  if (!baseUrl || !username || !apiToken) return undefined;
+  // Strip trailing slash so we can safely concatenate paths later.
+  return {
+    baseUrl: baseUrl.replace(/\/+$/, ""),
+    username,
+    apiToken,
+  };
 }
 
 // Throw if target is not contained within one of the configured roots.
@@ -248,6 +299,58 @@ export function appendNote(body: string, note: string): string {
     "",
     ...lines.slice(sectionEndIdx),
   ].join("\n");
+}
+
+// Overwrite a single frontmatter field with a value from JIRA. Used by the
+// "JIRA wins" / pull-jira flow. Field name is validated by the caller
+// against JIRA_PULLABLE_FIELDS before reaching this function.
+export function setArtifactField(
+  absPath: string,
+  field: string,
+  value: unknown,
+): ArtifactDetail {
+  return setArtifactFields(absPath, { [field]: value });
+}
+
+// Multi-field variant — used when the dashboard needs to update `status` and
+// `jiraStatus` together (single read, single write so they can't drift if a
+// caller crashes between two single-field writes).
+export function setArtifactFields(
+  absPath: string,
+  updates: Record<string, unknown>,
+): ArtifactDetail {
+  const current = readArtifact(absPath);
+  const nextFrontmatter: Record<string, unknown> = {
+    ...current.frontmatter,
+    ...updates,
+  };
+  const serialized = matter.stringify(current.body, nextFrontmatter, {
+    engines: { yaml: YAML_ENGINE },
+  });
+  atomicWrite(absPath, serialized);
+  return {
+    path: absPath,
+    frontmatter: nextFrontmatter,
+    body: current.body,
+  };
+}
+
+// Snooze a task by setting `sync-mute-until: YYYY-MM-DD`. todo-sync skips
+// notes with this field until the date passes. Date must be ISO YYYY-MM-DD
+// to round-trip cleanly through the JSON YAML schema (no auto-Date coercion).
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+export function snoozeArtifact(
+  absPath: string,
+  untilDate: string,
+): ArtifactDetail {
+  if (!ISO_DATE_RE.test(untilDate)) {
+    throw new ArtifactError(
+      400,
+      "untilDate must be in YYYY-MM-DD format",
+    );
+  }
+  return setArtifactField(absPath, "sync-mute-until", untilDate);
 }
 
 export interface ArchiveResult {

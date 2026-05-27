@@ -1,7 +1,8 @@
 {
   "_comment": "Server-side dashboard config. Copy to ~/.config/script-dashboard/server-config.json and edit. See CLAUDE.md.",
   "_schema": {
-    "artifactRoots": "Array of { root, archive } pairs. The dashboard's artifact endpoints only accept paths that resolve inside one of these roots; anything else returns 400. 'root' is where emitted artifacts live on disk; 'archive' is where the Archive button moves them. Order matters: roots are checked in order and the first match wins, so list the most specific roots first when they're nested inside broader ones."
+    "artifactRoots": "Array of { root, archive } pairs. The dashboard's artifact endpoints only accept paths that resolve inside one of these roots; anything else returns 400. 'root' is where emitted artifacts live on disk; 'archive' is where the Archive button moves them. Order matters: roots are checked in order and the first match wins, so list the most specific roots first when they're nested inside broader ones.",
+    "jira": "Optional. Credentials for the reconciliation endpoints (/api/jira/*, /api/artifacts/pull-jira). Omit the block to disable JIRA integration — those endpoints will return 503 and the dashboard hides the JIRA buttons. Token is from id.atlassian.com (Account Settings → Security → API tokens)."
   },
   "artifactRoots": [
     {
@@ -14,5 +15,11 @@
       "root": "/absolute/path/to/your/vault/Resources",
       "archive": "/absolute/path/to/your/vault/Resources-Archive"
     }
-  ]
+  ],
+  "jira": {
+    "_comment": "Remove this block to disable JIRA integration. Server reads at startup — restart after edits.",
+    "baseUrl": "https://your-tenant.atlassian.net",
+    "username": "you@example.com",
+    "apiToken": "REPLACE_ME"
+  }
 }

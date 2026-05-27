@@ -91,7 +91,7 @@ function App() {
               <button
                 onClick={() => setView("review")}
                 aria-pressed={view === "review"}
-                title="Review queue (needs review, oldest first)"
+                title="Review queue (needs review, newest first)"
                 className={`relative p-1.5 rounded-sm transition-colors ${
                   view === "review"
                     ? "bg-muted text-foreground"

@@ -6,10 +6,14 @@ import {
   appendNote,
   archiveArtifact,
   ArtifactError,
+  isJiraPullableField,
   loadArtifactsConfig,
   patchArtifact,
   readArtifact,
   resolveSafePath,
+  setArtifactField,
+  setArtifactFields,
+  snoozeArtifact,
 } from "../artifacts.js";
 
 let workdir: string;
@@ -366,3 +370,194 @@ function captureError(fn: () => unknown): unknown {
   }
   return null;
 }
+
+describe("loadArtifactsConfig — jira block", () => {
+  it("returns no jira when the block is missing", () => {
+    const p = path.join(workdir, "no-jira.json");
+    fs.writeFileSync(
+      p,
+      JSON.stringify({ artifactRoots: [{ root: "/x", archive: "/y" }] }),
+    );
+    const result = loadArtifactsConfig(p);
+    expect(result.jira).toBeUndefined();
+  });
+
+  it("returns no jira when the block is incomplete (missing apiToken)", () => {
+    const p = path.join(workdir, "partial-jira.json");
+    fs.writeFileSync(
+      p,
+      JSON.stringify({
+        artifactRoots: [],
+        jira: { baseUrl: "https://x", username: "u" },
+      }),
+    );
+    const result = loadArtifactsConfig(p);
+    expect(result.jira).toBeUndefined();
+  });
+
+  it("returns no jira when any field is empty string", () => {
+    const p = path.join(workdir, "empty-jira.json");
+    fs.writeFileSync(
+      p,
+      JSON.stringify({
+        artifactRoots: [],
+        jira: { baseUrl: "https://x", username: "", apiToken: "tkn" },
+      }),
+    );
+    expect(loadArtifactsConfig(p).jira).toBeUndefined();
+  });
+
+  it("parses a complete jira block and strips trailing slash from baseUrl", () => {
+    const p = path.join(workdir, "good-jira.json");
+    fs.writeFileSync(
+      p,
+      JSON.stringify({
+        artifactRoots: [],
+        jira: {
+          baseUrl: "https://x.atlassian.net/",
+          username: "u@x.com",
+          apiToken: "tkn",
+        },
+      }),
+    );
+    const result = loadArtifactsConfig(p);
+    expect(result.jira).toEqual({
+      baseUrl: "https://x.atlassian.net",
+      username: "u@x.com",
+      apiToken: "tkn",
+    });
+  });
+
+  it("still loads artifactRoots even when jira block is malformed", () => {
+    const p = path.join(workdir, "mixed-jira.json");
+    fs.writeFileSync(
+      p,
+      JSON.stringify({
+        artifactRoots: [{ root: "/x", archive: "/y" }],
+        jira: "not an object",
+      }),
+    );
+    const result = loadArtifactsConfig(p);
+    expect(result.artifactRoots).toHaveLength(1);
+    expect(result.jira).toBeUndefined();
+  });
+});
+
+describe("isJiraPullableField allowlist", () => {
+  it("accepts allowed fields", () => {
+    expect(isJiraPullableField("status")).toBe(true);
+    expect(isJiraPullableField("jiraStatus")).toBe(true);
+    expect(isJiraPullableField("sprint")).toBe(true);
+    expect(isJiraPullableField("jiraLabels")).toBe(true);
+    expect(isJiraPullableField("assignee")).toBe(true);
+  });
+
+  it("rejects free-form fields we don't want to clobber", () => {
+    expect(isJiraPullableField("description")).toBe(false);
+    expect(isJiraPullableField("tags")).toBe(false);
+    expect(isJiraPullableField("")).toBe(false);
+    // Path-like value (would be a giveaway of an injection attempt)
+    expect(isJiraPullableField("../etc/passwd")).toBe(false);
+  });
+});
+
+describe("setArtifactField", () => {
+  it("overwrites a frontmatter field and preserves the rest", () => {
+    const p = writeFixture("t.md", SAMPLE_TASK);
+    const result = setArtifactField(p, "status", "in-progress");
+    expect(result.frontmatter.status).toBe("in-progress");
+    expect(result.frontmatter.priority).toBe("3-medium");
+    expect(result.frontmatter.title).toBe("Test task");
+  });
+
+  it("adds a field that didn't exist before", () => {
+    const p = writeFixture("t.md", SAMPLE_TASK);
+    setArtifactField(p, "jiraStatus", "In Progress");
+    const reread = readArtifact(p);
+    expect(reread.frontmatter.jiraStatus).toBe("In Progress");
+  });
+
+  it("can write list values (for jiraLabels)", () => {
+    const p = writeFixture("t.md", SAMPLE_TASK);
+    setArtifactField(p, "jiraLabels", ["ai", "prompt"]);
+    const reread = readArtifact(p);
+    expect(reread.frontmatter.jiraLabels).toEqual(["ai", "prompt"]);
+  });
+
+  it("preserves YYYY-MM-DD date strings (regression guard)", () => {
+    const p = writeFixture(
+      "dated.md",
+      "---\nstatus: open\ndateCreated: 2026-04-21\n---\n\nBody.\n",
+    );
+    setArtifactField(p, "status", "in-progress");
+    const content = fs.readFileSync(p, "utf-8");
+    expect(content).toContain("dateCreated: 2026-04-21");
+    expect(content).not.toContain("T00:00:00");
+  });
+});
+
+describe("setArtifactFields (multi-field write)", () => {
+  it("updates several frontmatter fields in a single write", () => {
+    const p = writeFixture("t.md", SAMPLE_TASK);
+    const result = setArtifactFields(p, {
+      status: "in-progress",
+      jiraStatus: "In Progress",
+    });
+    expect(result.frontmatter.status).toBe("in-progress");
+    expect(result.frontmatter.jiraStatus).toBe("In Progress");
+    // Untouched fields preserved
+    expect(result.frontmatter.title).toBe("Test task");
+    expect(result.frontmatter.priority).toBe("3-medium");
+
+    // Persisted on disk
+    const reread = readArtifact(p);
+    expect(reread.frontmatter.status).toBe("in-progress");
+    expect(reread.frontmatter.jiraStatus).toBe("In Progress");
+  });
+
+  it("preserves YYYY-MM-DD date strings across the multi-write", () => {
+    // Regression guard: the dual-write path goes through matter.stringify
+    // too; verify it doesn't re-Date-ify YAML date strings.
+    const p = writeFixture(
+      "dated.md",
+      "---\nstatus: open\ndateCreated: 2026-04-21\ndue: 2026-05-01\n---\n\nBody.\n",
+    );
+    setArtifactFields(p, { status: "done", jiraStatus: "Done" });
+    const content = fs.readFileSync(p, "utf-8");
+    expect(content).toContain("dateCreated: 2026-04-21");
+    expect(content).toContain("due: 2026-05-01");
+    expect(content).not.toContain("T00:00:00");
+  });
+
+  it("handles an empty updates object as a no-op write", () => {
+    const p = writeFixture("t.md", SAMPLE_TASK);
+    const result = setArtifactFields(p, {});
+    expect(result.frontmatter.status).toBe("open");
+    expect(result.frontmatter.priority).toBe("3-medium");
+  });
+});
+
+describe("snoozeArtifact", () => {
+  it("writes sync-mute-until as a plain YYYY-MM-DD string", () => {
+    const p = writeFixture("t.md", SAMPLE_TASK);
+    snoozeArtifact(p, "2026-06-01");
+    const reread = readArtifact(p);
+    expect(reread.frontmatter["sync-mute-until"]).toBe("2026-06-01");
+    // The string must NOT be re-serialized as a JS timestamp.
+    const content = fs.readFileSync(p, "utf-8");
+    expect(content).toContain("sync-mute-until: 2026-06-01");
+    expect(content).not.toContain("T00:00:00");
+  });
+
+  it("rejects non-ISO date strings", () => {
+    const p = writeFixture("t.md", SAMPLE_TASK);
+    expect(() => snoozeArtifact(p, "next week")).toThrow(ArtifactError);
+    expect(() => snoozeArtifact(p, "06/01/2026")).toThrow(ArtifactError);
+    expect(() => snoozeArtifact(p, "2026-6-1")).toThrow(ArtifactError);
+  });
+
+  it("rejects empty string", () => {
+    const p = writeFixture("t.md", SAMPLE_TASK);
+    expect(() => snoozeArtifact(p, "")).toThrow(ArtifactError);
+  });
+});
