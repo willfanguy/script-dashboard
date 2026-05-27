@@ -166,6 +166,7 @@ On abort or error, pass `--exit-code 1` so the record shows `failed` instead of 
 - `meeting` — Recording/transcription pipeline
 - `manual` — On-demand (CLI, Raycast, Claude skills)
 - `skill` — Claude Code slash commands
+- `interactive` — Claude Code sessions you ran directly (started by the `SessionStart` hook, finalized by `SessionEnd`). One record per session. See `lib/hook-claude-session-start.sh` / `lib/hook-claude-session-end.sh`.
 - `eval` — Local eval runs (long-running; use `report_progress` to surface heartbeat)
 
 ## Configuration

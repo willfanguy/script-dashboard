@@ -220,6 +220,10 @@
       "label": "Slash Commands",
       "description": "Claude Code skills and slash commands"
     },
+    "interactive": {
+      "label": "Interactive Sessions",
+      "description": "Claude Code sessions you ran directly (not via launchd, slash command, or skill). One record per session, started by the SessionStart hook and finalized by SessionEnd."
+    },
     "eval": {
       "label": "Evals",
       "description": "Local eval runs (model/prompt regressions) — watch for progress, review results in your work thread"
