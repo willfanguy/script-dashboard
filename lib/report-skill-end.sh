@@ -87,18 +87,20 @@ if [ ! -f "$RUN_FILE" ]; then
     exit 1
 fi
 
-# Rehydrate the internal state report_end needs.
+# Rehydrate the internal state report_end needs. Description and progress
+# heartbeats live on the running record; pull them in so the finalized record
+# retains them instead of dropping context the start script wrote.
 _SD_RUN_ID="$RUN_ID"
 _SD_RUN_FILE="$RUN_FILE"
 _SD_OUTPUT_FILE="$OUTPUT_FILE"
 _SD_SCRIPT_NAME=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['script'])" "$RUN_FILE")
 _SD_CATEGORY=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['category'])" "$RUN_FILE")
 _SD_START_EPOCH=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['startEpoch'])" "$RUN_FILE")
-_SD_DESCRIPTION=""
+_SD_DESCRIPTION=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('description') or '')" "$RUN_FILE")
 _SD_ARTIFACTS=""
 _SD_REVIEW_REQUIRED="false"
-_SD_LAST_PROGRESS_AT=""
-_SD_LAST_PROGRESS_MSG=""
+_SD_LAST_PROGRESS_AT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('lastProgressAt') or '')" "$RUN_FILE")
+_SD_LAST_PROGRESS_MSG=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('lastProgressMessage') or '')" "$RUN_FILE")
 
 # Ensure the output file exists (report-skill-start.sh creates it, but guard anyway).
 [ -f "$_SD_OUTPUT_FILE" ] || : > "$_SD_OUTPUT_FILE"

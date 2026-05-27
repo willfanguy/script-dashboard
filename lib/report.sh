@@ -263,7 +263,7 @@ report_end() {
 
     # Update run record atomically
     local desc_json
-    desc_json=$(_sd_json_escape "${3:-}")
+    desc_json=$(_sd_json_escape "$_SD_DESCRIPTION")
 
     # Optional fields, only emitted when present
     local extras=""
@@ -288,6 +288,7 @@ report_end() {
   "id": "$_SD_RUN_ID",
   "script": "$_SD_SCRIPT_NAME",
   "category": "$_SD_CATEGORY",
+  "description": $desc_json,
   "status": "$_sd_status",
   "exitCode": $exit_code,
   "startedAt": "$(date -u -r "$_SD_START_EPOCH" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")",
