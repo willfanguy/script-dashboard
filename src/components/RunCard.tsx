@@ -224,6 +224,10 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
                 <p className="text-xs text-muted-foreground truncate mt-0.5 font-mono">
                   {run.lastProgressMessage}
                 </p>
+              ) : run.description ? (
+                <p className="text-xs text-muted-foreground truncate mt-0.5">
+                  {run.description}
+                </p>
               ) : scriptInfo?.description ? (
                 <p className="text-xs text-muted-foreground truncate mt-0.5">
                   {scriptInfo.description}
