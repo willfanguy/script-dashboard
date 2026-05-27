@@ -66,6 +66,23 @@ _sd_json_escape() {
         || printf '"%s"' "$(printf '%s' "$str" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')"
 }
 
+_sd_cmux_hook() {
+    # Optional cmux integration. Set CMUX_WORKSPACE_ID and CMUX_SURFACE_ID
+    # in ~/.config/script-dashboard/config.sh to route session-start/stop
+    # events into a cmux workspace tab. No-op when unconfigured.
+    local event="$1"  # session-start | stop
+    [ -z "${CMUX_WORKSPACE_ID:-}" ] && return 0
+    [ -z "${CMUX_SURFACE_ID:-}" ] && return 0
+    command -v cmux >/dev/null 2>&1 || return 0
+
+    local cmux_sid="${_SD_RUN_ID:-script-dash}"
+    printf '{"session_id":"%s"}' "$cmux_sid" \
+        | cmux claude-hook "$event" \
+            --workspace "$CMUX_WORKSPACE_ID" \
+            --surface "$CMUX_SURFACE_ID" \
+            >/dev/null 2>&1 || true
+}
+
 _sd_notify() {
     local title="$1"
     local message="$2"
@@ -119,6 +136,7 @@ report_start() {
     : > "$_SD_OUTPUT_FILE"
 
     _sd_write_running_json
+    _sd_cmux_hook session-start
 }
 
 # _sd_write_running_json
@@ -303,6 +321,8 @@ ENDJSON
         "Script Dashboard" \
         "[$icon] $_SD_SCRIPT_NAME (${duration_str})" \
         "${SCRIPT_DASH_URL}?run=${_SD_RUN_ID}"
+
+    _sd_cmux_hook stop
 
     # Clean up output capture file (content is in the JSON now)
     rm -f "$_SD_OUTPUT_FILE"
