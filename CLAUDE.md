@@ -117,6 +117,39 @@ source /path/to/script-dashboard/lib/report.sh
 report_exec "my-script" "scheduled" "Description here" -- your-command --with-args
 ```
 
+### Option 3: Claude slash commands / agents (multi-step skills)
+
+Slash commands and agents can't `source report.sh` because each Bash tool call runs in a fresh subshell — variables don't carry over. Use the split start/end pair:
+
+**At the very start (before any real work):**
+
+```bash
+RUN_ID=$(bash ~/Repos/personal/script-dashboard/lib/report-skill-start.sh \
+  "skill-name" "Short description")
+echo "$RUN_ID"
+```
+
+The skill remembers `$RUN_ID` in conversational context across later Bash calls.
+
+**At the end:**
+
+```bash
+bash ~/Repos/personal/script-dashboard/lib/report-skill-end.sh \
+  "$RUN_ID" "Summary line" \
+  --review \
+  --artifact task-note "Short label" "/absolute/path/to/file.md"
+```
+
+`--review` and `--artifact` are optional — omit them when nothing new was created.
+
+**Summary content convention:** pass the same wrap-up you presented to the user in chat — not a separate compressed one-liner. The dashboard card renders markdown, so bullets and bold work; the OS notification truncates at ~150 chars, so put the headline first. Mirroring keeps the dashboard, notification, and chat in sync — when a notification gets cut off, the dashboard card has the rest. Multi-line text: use `"$(cat <<'EOF' ... EOF)"` (quoted EOF) to preserve newlines and avoid accidental `$var` expansion in the body.
+
+On abort or error, pass `--exit-code 1` so the record shows `failed` instead of `success`.
+
+**One-shot alternative** (short-lived skills where mid-run visibility doesn't matter): `report-skill.sh` is still available. It calls both start and end back-to-back at the end of the work, which means `duration: 0` and no "running" card while the skill is working. Prefer the split pair for anything that takes more than a few seconds.
+
+**Pair pattern (skill wraps agent):** when a slash-command skill invokes a subagent via the Agent tool, emit start/end from the **skill** only. The agent should NOT also call any `report-skill*` script — that would produce duplicate records with the same script name. Keep the agent silent to the dashboard; the skill owns the record.
+
 ### Categories
 
 - `scheduled` — Launchd agents (timer-based)
