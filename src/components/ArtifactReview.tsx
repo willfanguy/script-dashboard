@@ -86,7 +86,10 @@ export function ArtifactReview({
   }
 
   if (artifact.type === "markdown") {
-    return <MarkdownArtifact artifact={artifact} />;
+    // Key on path so the component remounts with fresh state when the
+    // artifact changes — avoids needing a synchronous setLoading(true) in
+    // MarkdownArtifact's effect body.
+    return <MarkdownArtifact key={artifact.path} artifact={artifact} />;
   }
 
   const href =
@@ -125,7 +128,6 @@ function MarkdownArtifact({ artifact }: MarkdownArtifactProps) {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
     fetchArtifact(artifact.path)
       .then((d) => {
         if (!cancelled) {
