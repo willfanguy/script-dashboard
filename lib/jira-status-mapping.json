@@ -1,0 +1,45 @@
+{
+  "_comment": "Canonical JIRA status → local Task Note `status` mapping. Read by the script-dashboard server (server/jira-status-mapping.ts) AND referenced by ~/.claude/agents/todo-sync-processor.md. Single source of truth — update this file, not the agent's markdown table. Comparison is case-insensitive and whitespace/punctuation-tolerant: keys are normalized to lowercase-alphanumeric before lookup, so 'Ready for QA', 'ready-for-qa', and 'READYFORQA' all match the same entry.",
+  "_localStatusTaxonomy": [
+    "open",
+    "in-progress",
+    "ready-for-qa",
+    "waiting",
+    "done",
+    "cancelled",
+    "blocked",
+    "none"
+  ],
+  "mappings": [
+    { "jira": "To Do",                  "local": "open" },
+    { "jira": "Open",                   "local": "open" },
+    { "jira": "Backlog",                "local": "open" },
+    { "jira": "Ready to Start",         "local": "open" },
+    { "jira": "Pending Triage",         "local": "open" },
+
+    { "jira": "In Progress",            "local": "in-progress" },
+
+    { "jira": "Blocked",                "local": "blocked" },
+    { "jira": "On Hold",                "local": "waiting" },
+
+    { "jira": "QA",                     "local": "ready-for-qa" },
+    { "jira": "In QA",                  "local": "ready-for-qa" },
+    { "jira": "QA Testing",             "local": "ready-for-qa" },
+    { "jira": "Ready for QA",           "local": "ready-for-qa" },
+    { "jira": "Quality & Evals",        "local": "ready-for-qa" },
+    { "jira": "Quality and Evals",      "local": "ready-for-qa" },
+    { "jira": "Ready for Staging",      "local": "ready-for-qa" },
+    { "jira": "Under Review",           "local": "ready-for-qa" },
+    { "jira": "Ready for Release",      "local": "ready-for-qa" },
+
+    { "jira": "Deployed to Production", "local": "done" },
+    { "jira": "Done",                   "local": "done" },
+    { "jira": "Closed",                 "local": "done" },
+    { "jira": "Resolved",               "local": "done" },
+
+    { "jira": "Cancelled",              "local": "cancelled" },
+    { "jira": "Canceled",               "local": "cancelled" },
+    { "jira": "Won't Do",               "local": "cancelled" },
+    { "jira": "Won't Fix",              "local": "cancelled" }
+  ]
+}
