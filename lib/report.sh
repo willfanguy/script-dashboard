@@ -221,7 +221,7 @@ report_review_required() {
 # If EXIT_CODE is omitted, uses $? from the last command.
 report_end() {
     local exit_code="${1:-$?}"
-    local status="success"
+    local _sd_status="success"  # `status` collides with zsh's readonly built-in
     local end_epoch
 
     [ -z "$_SD_RUN_FILE" ] && return 0
@@ -230,9 +230,9 @@ report_end() {
     local duration=$(( end_epoch - _SD_START_EPOCH ))
 
     if [ "$exit_code" -eq 137 ] || [ "$exit_code" -eq 143 ]; then
-        status="killed"
+        _sd_status="killed"
     elif [ "$exit_code" -ne 0 ]; then
-        status="failed"
+        _sd_status="failed"
     fi
 
     # Read captured output (truncate to ~100KB to avoid bloat)
@@ -270,7 +270,7 @@ report_end() {
   "id": "$_SD_RUN_ID",
   "script": "$_SD_SCRIPT_NAME",
   "category": "$_SD_CATEGORY",
-  "status": "$status",
+  "status": "$_sd_status",
   "exitCode": $exit_code,
   "startedAt": "$(date -u -r "$_SD_START_EPOCH" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")",
   "endedAt": "$(_sd_iso_date)",
@@ -286,7 +286,7 @@ ENDJSON
 
     # Send notification
     local icon=""
-    case "$status" in
+    case "$_sd_status" in
         success) icon="OK" ;;
         failed)  icon="FAIL" ;;
         killed)  icon="KILLED" ;;
