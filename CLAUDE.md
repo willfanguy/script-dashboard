@@ -160,6 +160,69 @@ On abort or error, pass `--exit-code 1` so the record shows `failed` instead of 
 
 **Pair pattern (skill wraps agent):** when a slash-command skill invokes a subagent via the Agent tool, emit start/end from the **skill** only. The agent should NOT also call any `report-skill*` script — that would produce duplicate records with the same script name. Keep the agent silent to the dashboard; the skill owns the record.
 
+### Option 4: Claude Code lifecycle hooks (interactive sessions)
+
+Tracks the `claude` sessions you run directly (not via launchd / slash
+commands / skills). Wire three hooks in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "", "hooks": [
+        { "type": "command",
+          "command": "/path/to/script-dashboard/lib/hook-claude-session-start.sh",
+          "timeout": 5 }
+      ]}
+    ],
+    "Stop": [
+      { "matcher": "", "hooks": [
+        { "type": "command",
+          "command": "/path/to/script-dashboard/lib/hook-claude-stop.sh",
+          "timeout": 5 }
+      ]}
+    ],
+    "SessionEnd": [
+      { "matcher": "", "hooks": [
+        { "type": "command",
+          "command": "/path/to/script-dashboard/lib/hook-claude-session-end.sh",
+          "timeout": 5 }
+      ]}
+    ]
+  }
+}
+```
+
+What each hook does:
+
+- `hook-claude-session-start.sh` — opens a `"running"` dashboard record
+  under the `interactive` category, writes a bridge file at
+  `~/.script-runs/.claude-sessions/${session_id}.runid` so the later
+  hooks can find it.
+- `hook-claude-stop.sh` — runs after every Claude response, updates
+  `lastProgressAt` on the open record. Without this, long sessions
+  would get swept by stale-runs after 30 min.
+- `hook-claude-session-end.sh` — finalizes the record on session exit.
+
+**Co-existence with other Stop hooks.** Claude Code allows multiple
+hooks per event. If you already have a Stop hook (e.g., a personal
+audit log), add `hook-claude-stop.sh` as a second entry in the same
+Stop array; they fire independently.
+
+**Failure modes:**
+
+- Bash tool calls inside `claude -p` (one-shot mode) only fire `Stop`,
+  not `SessionStart`/`SessionEnd`. The Stop hook silently no-ops when
+  no bridge file exists.
+- If Claude crashes or is force-killed, `SessionEnd` doesn't fire and
+  the record stays `"running"`. The stale-run sweep (30 min default)
+  marks it `killed` and the dashboard moves on.
+- `report_exec`-wrapped Claude invocations (launchd jobs) will produce
+  TWO dashboard records: one `scheduled` from `report_exec`, one
+  `interactive` from these hooks. Filter by category in the dashboard
+  to disambiguate. If this gets noisy, future work could detect the
+  parent `_SD_RUN_ID` and skip the interactive record.
+
 ### Categories
 
 - `scheduled` — Launchd agents (timer-based)
