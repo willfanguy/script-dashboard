@@ -42,6 +42,12 @@ while [ $# -gt 0 ]; do
                 echo "--exit-code requires a value" >&2
                 exit 2
             fi
+            case "$2" in
+                ''|*[!0-9]*)
+                    echo "--exit-code must be a non-negative integer, got: $2" >&2
+                    exit 2
+                    ;;
+            esac
             EXIT_CODE="$2"
             shift 2
             ;;
@@ -93,14 +99,34 @@ fi
 _SD_RUN_ID="$RUN_ID"
 _SD_RUN_FILE="$RUN_FILE"
 _SD_OUTPUT_FILE="$OUTPUT_FILE"
-_SD_SCRIPT_NAME=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['script'])" "$RUN_FILE")
-_SD_CATEGORY=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['category'])" "$RUN_FILE")
-_SD_START_EPOCH=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['startEpoch'])" "$RUN_FILE")
-_SD_DESCRIPTION=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('description') or '')" "$RUN_FILE")
 _SD_ARTIFACTS=""
 _SD_REVIEW_REQUIRED="false"
-_SD_LAST_PROGRESS_AT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('lastProgressAt') or '')" "$RUN_FILE")
-_SD_LAST_PROGRESS_MSG=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('lastProgressMessage') or '')" "$RUN_FILE")
+
+# Read all rehydrated fields in a single python3 call (was five) — fewer
+# subprocesses and one failure path under `set -e` instead of five. Fields are
+# NUL-separated so descriptions / progress messages containing newlines or tabs
+# survive intact (bash can't hold NULs in a variable, so we stream + read).
+{
+    IFS= read -r -d '' _SD_SCRIPT_NAME
+    IFS= read -r -d '' _SD_CATEGORY
+    IFS= read -r -d '' _SD_START_EPOCH
+    IFS= read -r -d '' _SD_DESCRIPTION
+    IFS= read -r -d '' _SD_LAST_PROGRESS_AT
+    IFS= read -r -d '' _SD_LAST_PROGRESS_MSG
+} < <(python3 - "$RUN_FILE" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for v in (
+    d.get("script") or "",
+    d.get("category") or "",
+    str(d.get("startEpoch") or ""),
+    d.get("description") or "",
+    d.get("lastProgressAt") or "",
+    d.get("lastProgressMessage") or "",
+):
+    sys.stdout.write(v + "\0")
+PY
+)
 
 # Ensure the output file exists (report-skill-start.sh creates it, but guard anyway).
 [ -f "$_SD_OUTPUT_FILE" ] || : > "$_SD_OUTPUT_FILE"

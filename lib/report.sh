@@ -34,6 +34,11 @@ SCRIPT_DASH_NOTIFY="${SCRIPT_DASH_NOTIFY:-1}"
 # sessions — too many per day to be useful. Interactive failures still notify.
 SCRIPT_DASH_NOTIFY_INTERACTIVE="${SCRIPT_DASH_NOTIFY_INTERACTIVE:-0}"
 
+# python3 owns all JSON serialization (escaping + atomic writes). It is a hard
+# requirement: when absent, record-writing no-ops loudly rather than emit the
+# corrupt JSON the old shell-level sed/tr fallback could produce.
+_SD_PY="$(command -v python3 2>/dev/null || true)"
+
 # --- Internal state ---
 _SD_RUN_ID=""
 _SD_RUN_FILE=""
@@ -46,6 +51,11 @@ _SD_ARTIFACTS=""        # Comma-separated JSON object entries, accumulated acros
 _SD_REVIEW_REQUIRED="false"
 _SD_LAST_PROGRESS_AT=""
 _SD_LAST_PROGRESS_MSG=""
+# Terminal-write fields, populated by report_end before the final record write.
+_SD_EXIT_CODE=""
+_SD_END_EPOCH=""
+_SD_DURATION=""
+_SD_OUTPUT=""
 
 # --- Helpers ---
 
@@ -61,12 +71,108 @@ _sd_ensure_dir() {
     mkdir -p "$SCRIPT_RUNS_DIR"
 }
 
-_sd_json_escape() {
-    # Escape a string for safe JSON embedding.
-    # Handles backslashes, quotes, newlines, tabs, and control characters.
-    local str="$1"
-    printf '%s' "$str" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()), end="")' 2>/dev/null \
-        || printf '"%s"' "$(printf '%s' "$str" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')"
+# _sd_write_record STATUS
+#
+# Write the run record atomically as valid JSON via python3, which owns all
+# escaping and the tempfile+os.replace. Every field — including id/script/
+# category/host — is passed through json.dumps, so no special character in any
+# value can corrupt the record. (The previous heredoc left those four fields
+# unescaped; a stray quote produced invalid JSON the server silently drops.)
+#
+# STATUS "running" writes the in-progress record (metadata only; the server
+# serves the live .output file for running runs). A terminal status
+# (success|failed|killed) additionally writes exitCode/endedAt/endEpoch/
+# duration/output plus any artifacts and reviewRequired.
+_sd_write_record() {
+    local _sd_rec_status="$1"  # not `status` — that's read-only in zsh
+    [ -z "$_SD_RUN_FILE" ] && return 0
+    if [ -z "$_SD_PY" ]; then
+        echo "script-dashboard: python3 required for run reporting; record not written" >&2
+        return 0
+    fi
+
+    SD_REC_FILE="$_SD_RUN_FILE" \
+    SD_ID="$_SD_RUN_ID" \
+    SD_SCRIPT="$_SD_SCRIPT_NAME" \
+    SD_CATEGORY="$_SD_CATEGORY" \
+    SD_DESCRIPTION="$_SD_DESCRIPTION" \
+    SD_STATUS="$_sd_rec_status" \
+    SD_START_EPOCH="$_SD_START_EPOCH" \
+    SD_PID="$$" \
+    SD_HOST="$(hostname -s 2>/dev/null)" \
+    SD_EXIT_CODE="$_SD_EXIT_CODE" \
+    SD_END_EPOCH="$_SD_END_EPOCH" \
+    SD_DURATION="$_SD_DURATION" \
+    SD_OUTPUT="$_SD_OUTPUT" \
+    SD_ARTIFACTS="$_SD_ARTIFACTS" \
+    SD_REVIEW_REQUIRED="$_SD_REVIEW_REQUIRED" \
+    SD_LAST_PROGRESS_AT="$_SD_LAST_PROGRESS_AT" \
+    SD_LAST_PROGRESS_MSG="$_SD_LAST_PROGRESS_MSG" \
+    "$_SD_PY" - <<'PY'
+import json, os, tempfile
+from datetime import datetime, timezone
+
+
+def env(k):
+    return os.environ.get(k, "")
+
+
+def iso(epoch):
+    return datetime.fromtimestamp(int(epoch), tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+status = env("SD_STATUS")
+rec = {
+    "id": env("SD_ID"),
+    "script": env("SD_SCRIPT"),
+    "category": env("SD_CATEGORY"),
+    "description": env("SD_DESCRIPTION"),
+    "status": status,
+    "startedAt": iso(env("SD_START_EPOCH")),
+    "startEpoch": int(env("SD_START_EPOCH")),
+    "pid": int(env("SD_PID")),
+    "host": env("SD_HOST"),
+}
+
+if env("SD_LAST_PROGRESS_AT"):
+    rec["lastProgressAt"] = env("SD_LAST_PROGRESS_AT")
+    rec["lastProgressMessage"] = env("SD_LAST_PROGRESS_MSG")
+
+if status != "running":
+    rec["exitCode"] = int(env("SD_EXIT_CODE") or 0)
+    rec["endedAt"] = iso(env("SD_END_EPOCH"))
+    rec["endEpoch"] = int(env("SD_END_EPOCH"))
+    rec["duration"] = int(env("SD_DURATION") or 0)
+    rec["output"] = env("SD_OUTPUT")
+    arts = env("SD_ARTIFACTS").strip()
+    if arts:
+        # Artifact entries are produced by report_artifact via json.dumps, so
+        # this is always valid; tolerate a malformed accumulator rather than
+        # losing the whole record.
+        try:
+            rec["artifacts"] = json.loads("[" + arts + "]")
+        except json.JSONDecodeError:
+            pass
+    if env("SD_REVIEW_REQUIRED") == "true":
+        rec["reviewRequired"] = True
+
+dest = env("SD_REC_FILE")
+fd, tmp = tempfile.mkstemp(
+    dir=os.path.dirname(dest) or ".", prefix=".rec-", suffix=".tmp"
+)
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(rec, f, indent=2)
+    os.replace(tmp, dest)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+PY
 }
 
 _sd_cmux_hook() {
@@ -154,6 +260,10 @@ report_start() {
     _SD_REVIEW_REQUIRED="false"
     _SD_LAST_PROGRESS_AT=""
     _SD_LAST_PROGRESS_MSG=""
+    _SD_EXIT_CODE=""
+    _SD_END_EPOCH=""
+    _SD_DURATION=""
+    _SD_OUTPUT=""
     _SD_START_EPOCH=$(_sd_epoch)
     _SD_RUN_ID="${name}-$(_sd_iso_date | tr ':' '-')-$$"
     _SD_RUN_FILE="${SCRIPT_RUNS_DIR}/${_SD_RUN_ID}.json"
@@ -168,36 +278,11 @@ report_start() {
 
 # _sd_write_running_json
 #
-# (Re)write the run record while the script is in progress. Called from
-# report_start and report_progress. The server exposes the live .output file
-# for running runs, so we only embed metadata — not the output — here.
+# (Re)write the in-progress run record. Called from report_start and
+# report_progress. The server serves the live .output file for running runs,
+# so the record carries metadata only — not the output.
 _sd_write_running_json() {
-    local desc_json
-    desc_json=$(_sd_json_escape "$_SD_DESCRIPTION")
-
-    local progress_fields=""
-    if [ -n "$_SD_LAST_PROGRESS_AT" ]; then
-        local msg_json
-        msg_json=$(_sd_json_escape "$_SD_LAST_PROGRESS_MSG")
-        progress_fields=",
-  \"lastProgressAt\": \"$_SD_LAST_PROGRESS_AT\",
-  \"lastProgressMessage\": $msg_json"
-    fi
-
-    cat > "${_SD_RUN_FILE}.tmp" << ENDJSON
-{
-  "id": "$_SD_RUN_ID",
-  "script": "$_SD_SCRIPT_NAME",
-  "category": "$_SD_CATEGORY",
-  "description": $desc_json,
-  "status": "running",
-  "startedAt": "$(date -u -r "$_SD_START_EPOCH" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || _sd_iso_date)",
-  "startEpoch": $_SD_START_EPOCH,
-  "pid": $$,
-  "host": "$(hostname -s)"${progress_fields}
-}
-ENDJSON
-    mv "${_SD_RUN_FILE}.tmp" "$_SD_RUN_FILE"
+    _sd_write_record "running"
 }
 
 # report_log MESSAGE
@@ -241,10 +326,12 @@ report_artifact() {
     local type="$1"
     local label="$2"
     local path="$3"
-    local label_json path_json
-    label_json=$(_sd_json_escape "$label")
-    path_json=$(_sd_json_escape "$path")
-    local entry="{\"type\":\"$type\",\"label\":$label_json,\"path\":$path_json}"
+    [ -z "$_SD_PY" ] && return 0
+    # Build the entry via json.dumps so every field (including type) is escaped;
+    # the accumulator is then always valid JSON for _sd_write_record to splice.
+    local entry
+    entry=$(SD_T="$type" SD_L="$label" SD_P="$path" "$_SD_PY" -c \
+'import json,os; print(json.dumps({"type":os.environ["SD_T"],"label":os.environ["SD_L"],"path":os.environ["SD_P"]}))')
     if [ -z "$_SD_ARTIFACTS" ]; then
         _SD_ARTIFACTS="$entry"
     else
@@ -271,6 +358,13 @@ report_end() {
 
     [ -z "$_SD_RUN_FILE" ] && return 0
 
+    # Coerce a non-numeric exit code (e.g. a stray --exit-code arg) to a
+    # failure so the comparisons and python int() below can't crash finalize
+    # and strand the record in "running".
+    case "$exit_code" in
+        ''|*[!0-9]*) exit_code=1 ;;
+    esac
+
     end_epoch=$(_sd_epoch)
     local duration=$(( end_epoch - _SD_START_EPOCH ))
 
@@ -285,50 +379,13 @@ report_end() {
     if [ -f "$_SD_OUTPUT_FILE" ] && [ -s "$_SD_OUTPUT_FILE" ]; then
         output=$(tail -c 102400 "$_SD_OUTPUT_FILE")
     fi
-    local output_json
-    output_json=$(_sd_json_escape "$output")
 
-    # Update run record atomically
-    local desc_json
-    desc_json=$(_sd_json_escape "$_SD_DESCRIPTION")
-
-    # Optional fields, only emitted when present
-    local extras=""
-    if [ -n "$_SD_ARTIFACTS" ]; then
-        extras="${extras},
-  \"artifacts\": [$_SD_ARTIFACTS]"
-    fi
-    if [ "$_SD_REVIEW_REQUIRED" = "true" ]; then
-        extras="${extras},
-  \"reviewRequired\": true"
-    fi
-    if [ -n "$_SD_LAST_PROGRESS_AT" ]; then
-        local final_msg_json
-        final_msg_json=$(_sd_json_escape "$_SD_LAST_PROGRESS_MSG")
-        extras="${extras},
-  \"lastProgressAt\": \"$_SD_LAST_PROGRESS_AT\",
-  \"lastProgressMessage\": $final_msg_json"
-    fi
-
-    cat > "${_SD_RUN_FILE}.tmp" << ENDJSON
-{
-  "id": "$_SD_RUN_ID",
-  "script": "$_SD_SCRIPT_NAME",
-  "category": "$_SD_CATEGORY",
-  "description": $desc_json,
-  "status": "$_sd_status",
-  "exitCode": $exit_code,
-  "startedAt": "$(date -u -r "$_SD_START_EPOCH" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")",
-  "endedAt": "$(_sd_iso_date)",
-  "startEpoch": $_SD_START_EPOCH,
-  "endEpoch": $end_epoch,
-  "duration": $duration,
-  "pid": $$,
-  "host": "$(hostname -s)",
-  "output": $output_json${extras}
-}
-ENDJSON
-    mv "${_SD_RUN_FILE}.tmp" "$_SD_RUN_FILE"
+    # Hand the terminal fields to the central writer (escaping + atomic write).
+    _SD_EXIT_CODE="$exit_code"
+    _SD_END_EPOCH="$end_epoch"
+    _SD_DURATION="$duration"
+    _SD_OUTPUT="$output"
+    _sd_write_record "$_sd_status"
 
     # Format duration for notification
     local duration_str
