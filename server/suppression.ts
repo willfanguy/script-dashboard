@@ -64,6 +64,20 @@ export function isRunFullyReviewed(
   return visible.every((a) => !!a.reviewedAt);
 }
 
+// A stable timestamp to project onto a fully-reviewed run. Must be derived
+// from persisted fields only — using `Date.now()` here would reset the run's
+// "All reviewed Xm ago" label to "just now" on every GET, since the projection
+// recomputes per-read. Prefer the latest artifact review; fall back to the
+// run's own end/start time when every artifact was reviewed on another run (so
+// none carries a reviewedAt on this record).
+function projectedReviewedAt(record: RunRecord): string {
+  let latest = "";
+  for (const a of record.artifacts ?? []) {
+    if (a.reviewedAt && a.reviewedAt > latest) latest = a.reviewedAt;
+  }
+  return latest || record.endedAt || record.startedAt;
+}
+
 // Drop suppressed-unreviewed artifacts from a record in place (read-time
 // projection — the on-disk record is untouched). Returns the count dropped.
 //
@@ -83,7 +97,7 @@ export function applySuppressionFilter(
   if (!record.artifacts || record.artifacts.length === 0) return 0;
   const before = record.artifacts.length;
   if (isRunFullyReviewed(record, registry)) {
-    record.reviewedAt = new Date().toISOString();
+    record.reviewedAt = projectedReviewedAt(record);
   }
   record.artifacts = record.artifacts.filter(
     (a) => !(a.path in registry) || !!a.reviewedAt,

@@ -254,6 +254,26 @@ describe("unified review rollup (read projection)", () => {
     const res = await request(app).get("/api/runs/noart-1").expect(200);
     expect(res.body.reviewedAt).toBeUndefined();
   });
+
+  it("projects a STABLE reviewedAt across reads (not a fresh Date each time)", async () => {
+    fs.writeFileSync(
+      suppressedFile,
+      JSON.stringify({
+        "/vault/gone.md": { reason: "archived", suppressedAt: "x" },
+      }),
+    );
+    writeRun({
+      id: "stable-1",
+      reviewRequired: true,
+      startedAt: "2026-05-29T00:00:00Z",
+      artifacts: [{ type: "task-note", label: "Gone", path: "/vault/gone.md" }],
+    });
+    const first = await request(app).get("/api/runs/stable-1").expect(200);
+    const second = await request(app).get("/api/runs/stable-1").expect(200);
+    expect(first.body.reviewedAt).toBeTruthy();
+    // The bug this guards: projecting Date.now() reset the timestamp per read.
+    expect(second.body.reviewedAt).toBe(first.body.reviewedAt);
+  });
 });
 
 describe("JIRA endpoints without configuration", () => {

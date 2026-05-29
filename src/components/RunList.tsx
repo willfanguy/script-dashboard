@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { RunRecord, ScriptRegistry } from "@/types";
 import { RunCard } from "./RunCard";
@@ -10,12 +10,20 @@ import { clusterChronoRuns, type ChronoEntry } from "@/utils/clusterRuns";
 import { formatDate } from "@/utils/formatting";
 
 // Pull the leading run from a chronological entry so we can group adjacent
-// entries by day for the sticky-header timeline.
+// entries by day for the sticky-header timeline. A cluster files under its
+// NEWEST member's day (runs[0]) — deliberate: the cluster sits at its newest
+// member's position in the newest-first list, so labeling it by an older day
+// would clash with where it visually lands. A cluster that straddles midnight
+// shows the full span ("Yesterday … – Today …") in its own card header.
 function entryStartedAt(entry: ChronoEntry): string {
   return entry.kind === "run"
     ? entry.run.startedAt
     : entry.cluster.runs[0].startedAt;
 }
+
+type ChronoItem =
+  | { kind: "day-header"; key: string; label: string }
+  | { kind: "entry"; entry: ChronoEntry };
 
 export type RunListView = "grouped" | "chronological" | "review";
 
@@ -50,8 +58,9 @@ function loadChronoFilter(): Set<string> {
 }
 
 export function RunList({ runs, registry, onExpand, view }: RunListProps) {
-  const scriptMap = new Map(
-    registry?.scripts.map((s) => [s.id, s]) || []
+  const scriptMap = useMemo(
+    () => new Map(registry?.scripts.map((s) => [s.id, s]) || []),
+    [registry],
   );
 
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
@@ -99,6 +108,33 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
     });
   };
 
+  // Derived views, memoized so they don't recompute on every render (e.g. a
+  // 1s ticker inside a running RunCard). Kept above the early returns below so
+  // the hook order stays stable.
+  const chrono = useMemo(() => {
+    const filtered = runs.filter((r) => !chronoDisabled.has(r.category));
+    const entries = clusterChronoRuns(filtered);
+    // Insert day-separator items between entries when the calendar day changes.
+    // Entries are newest-first, so the first item carries the most recent day.
+    const items: ChronoItem[] = [];
+    let prevDayKey = "";
+    for (const entry of entries) {
+      const iso = entryStartedAt(entry);
+      const dayKey = new Date(iso).toDateString();
+      if (dayKey !== prevDayKey) {
+        items.push({ kind: "day-header", key: dayKey, label: formatDate(iso) });
+        prevDayKey = dayKey;
+      }
+      items.push({ kind: "entry", entry });
+    }
+    return { entries, items };
+  }, [runs, chronoDisabled]);
+
+  const grouped = useMemo(
+    () => groupByCategory(runs, registry),
+    [runs, registry],
+  );
+
   if (runs.length === 0) {
     return (
       <div className="text-center py-16 text-muted-foreground">
@@ -111,30 +147,7 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
   }
 
   if (view === "chronological") {
-    const filtered = runs.filter((r) => !chronoDisabled.has(r.category));
-    const entries = clusterChronoRuns(filtered);
-
-    // Insert day-separator items between entries when the calendar day
-    // changes. Entries are sorted newest-first, so the first item carries
-    // the most recent day.
-    type ChronoItem =
-      | { kind: "day-header"; key: string; label: string }
-      | { kind: "entry"; entry: ChronoEntry };
-    const items: ChronoItem[] = [];
-    let prevDayKey = "";
-    for (const entry of entries) {
-      const iso = entryStartedAt(entry);
-      const dayKey = new Date(iso).toDateString();
-      if (dayKey !== prevDayKey) {
-        items.push({
-          kind: "day-header",
-          key: dayKey,
-          label: formatDate(iso),
-        });
-        prevDayKey = dayKey;
-      }
-      items.push({ kind: "entry", entry });
-    }
+    const { entries, items } = chrono;
 
     return (
       <div>
@@ -222,8 +235,6 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
       </div>
     );
   }
-
-  const grouped = groupByCategory(runs, registry);
 
   return (
     <div className="space-y-8">
