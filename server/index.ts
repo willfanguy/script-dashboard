@@ -2,904 +2,135 @@ import express from "express";
 import cors from "cors";
 import fs from "fs";
 import path from "path";
-import os from "os";
 import { fileURLToPath } from "url";
 import {
-  ArtifactError,
-  archiveArtifact,
-  isJiraPullableField,
-  loadArtifactsConfig,
-  patchArtifact,
-  readArtifact,
-  resolveSafePath,
-  setArtifactField,
-  setArtifactFields,
-  snoozeArtifact,
-} from "./artifacts.js";
-import { createJiraClient, JiraError, type JiraClient } from "./jira.js";
-import {
-  jiraToLocalStatus,
-  loadStatusMapping,
-} from "./jira-status-mapping.js";
+  defaultConfig,
+  type AppConfig,
+  type RouteContext,
+} from "./app-config.js";
+import { createSse } from "./sse.js";
+import { registerRunRoutes } from "./routes/runs.js";
+import { registerArtifactRoutes } from "./routes/artifacts.js";
+import { registerJiraRoutes } from "./routes/jira.js";
 import { sweepStaleRunning } from "./stale-runs.js";
+
+// Re-exported so tests and tooling can import them from the entry point.
+export type { AppConfig } from "./app-config.js";
+export { defaultConfig } from "./app-config.js";
+export type { RunRecord } from "./types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const app = express();
-const PORT = parseInt(process.env.PORT || "7890", 10);
-
-// Run records directory — defaults to ~/.script-runs/runs
-const RUNS_DIR =
-  process.env.SCRIPT_RUNS_DIR ||
-  path.join(os.homedir(), ".script-runs", "runs");
-
-// Suppression registry — paths in this file are filtered out of every GET so
-// reviewed / archived items don't keep reappearing in the review queue on each
-// agent rerun. Indefinite mute keyed by absolute artifact path; un-mark
-// reviewed via the dashboard removes the entry.
-const SUPPRESSED_FILE =
-  process.env.SCRIPT_SUPPRESSED_FILE ||
-  path.join(path.dirname(RUNS_DIR), ".suppressed.json");
-
-interface SuppressionEntry {
-  reason: "reviewed" | "archived";
-  suppressedAt: string;
-  viaScript?: string;
-  viaRunId?: string;
-}
-
-type SuppressionRegistry = Record<string, SuppressionEntry>;
-
-function readSuppressed(): SuppressionRegistry {
-  if (!fs.existsSync(SUPPRESSED_FILE)) return {};
-  try {
-    const raw = fs.readFileSync(SUPPRESSED_FILE, "utf-8");
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeSuppressed(reg: SuppressionRegistry): void {
-  const dir = path.dirname(SUPPRESSED_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmp = `${SUPPRESSED_FILE}.tmp.${process.pid}.${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(reg, null, 2), "utf-8");
-  fs.renameSync(tmp, SUPPRESSED_FILE);
-}
-
-function addSuppression(
-  artifactPath: string,
-  entry: SuppressionEntry,
-): void {
-  const reg = readSuppressed();
-  reg[artifactPath] = entry;
-  writeSuppressed(reg);
-}
-
-function removeSuppression(artifactPath: string): void {
-  const reg = readSuppressed();
-  if (!(artifactPath in reg)) return;
-  delete reg[artifactPath];
-  writeSuppressed(reg);
-}
-
-// Apply the suppression filter to a run record's artifacts in place. Returns
-// the number of artifacts dropped so callers can log/expose if desired.
-//
-// Filter rule: drop artifacts whose path is in the registry AND which lack a
-// reviewedAt timestamp on this run record. This keeps the SOURCE run's
-// reviewed stub visible (so the user can undo) while suppressing the same
-// path's reappearance on every NEW run that emits it. Archived artifacts
-// always have no reviewedAt, so they're stripped cleanly on next refresh.
-//
-// Also virtually clears reviewedAt on the RUN record when every surviving
-// (post-filter) artifact is reviewed. Without this, a run whose unreviewed
-// artifacts all got suppression-filtered (because they were reviewed or
-// archived on a different run) would stay in the Needs Review queue forever
-// — the on-disk rollup in POST /artifacts/reviewed operates on the unfiltered
-// list and never fires. This projection is read-time only; the persisted
-// record is unchanged.
-function applySuppressionFilter(
-  record: RunRecord,
-  registry: SuppressionRegistry,
-): number {
-  if (!record.artifacts || record.artifacts.length === 0) return 0;
-  const before = record.artifacts.length;
-  record.artifacts = record.artifacts.filter(
-    (a) => !(a.path in registry) || !!a.reviewedAt,
-  );
-  if (
-    record.reviewRequired &&
-    !record.reviewedAt &&
-    record.artifacts.every((a) => !!a.reviewedAt)
-  ) {
-    record.reviewedAt = new Date().toISOString();
-  }
-  return before - record.artifacts.length;
-}
-
-const ARTIFACTS_CONFIG = loadArtifactsConfig();
-const JIRA: JiraClient | null = ARTIFACTS_CONFIG.jira
-  ? createJiraClient(ARTIFACTS_CONFIG.jira)
-  : null;
-const STATUS_MAPPING = loadStatusMapping();
-// Issue keys look like ABC-123. Constrain before they reach JIRA / URL builders.
-const JIRA_KEY_PATTERN = /^[A-Z][A-Z0-9_]+-\d+$/;
-
-// Runs stuck in "running" past this window get marked killed by the periodic
-// sweep. Agents that legitimately need more than 30 min should emit
-// report_progress heartbeats — any heartbeat resets the idle clock.
-const STALE_RUN_THRESHOLD_MINUTES = parseInt(
-  process.env.STALE_RUN_THRESHOLD_MINUTES || "30",
-  10,
-);
 const STALE_RUN_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+// Per-category sweep thresholds. Interactive Claude sessions are alive across
+// long idle periods (meetings, reading, lunch) and shouldn't be killed by the
+// 30-min cadence that catches genuinely hung scripted jobs. 8h covers a workday
+// of intermittent typing; orphans still get cleaned up within one calendar day
+// if Claude Code crashes without SessionEnd.
+const STALE_CATEGORY_OVERRIDES_MS: Record<string, number> = {
+  interactive: 8 * 60 * 60 * 1000,
+};
 
-app.use(cors());
-app.use(express.json());
-
-// Run IDs are generated by report.sh as `${name}-${iso-date}-${pid}`, so the
-// legal character set is conservative. Reject anything outside it before the
-// id reaches `path.join`, which otherwise would allow traversal via "../".
-const RUN_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
-app.param("id", (_req, res, next, id) => {
-  if (!RUN_ID_PATTERN.test(id)) {
-    res.status(400).json({ error: "Invalid run id" });
-    return;
-  }
-  next();
-});
-
-// Structured metadata attached to an artifact by the emitting agent. Drives
-// the conditional buttons in the dashboard's review panel. Optional — agents
-// that don't emit decisions render with the default edit/archive buttons.
-interface ArtifactDecision {
-  kind:
-    | "status-divergence"      // JIRA + local disagree on status
-    | "local-ahead-of-jira"    // local is in-progress/done but JIRA is behind
-    | "backlog-stale"          // backlog + no sprint + no due date
-    | "local-done-jira-open"   // done locally but JIRA isn't closed
-    | "jira-now-done";         // JIRA closed but local still open
-  jiraKey: string;
-  jiraStatus?: string;
-  localStatus?: string;
-  note?: string;               // free-form context for the dashboard card
-}
-
-interface Artifact {
-  type: "task-note" | "file" | "url";
-  label: string;
-  path: string;
-  decision?: ArtifactDecision;
-  reviewedAt?: string;
-}
-
-interface RunRecord {
-  id: string;
-  script: string;
-  category: string;
-  description?: string;
-  status: "running" | "success" | "failed" | "killed";
-  exitCode?: number;
-  startedAt: string;
-  endedAt?: string;
-  startEpoch: number;
-  endEpoch?: number;
-  duration?: number;
-  pid?: number;
-  host?: string;
-  output?: string;
-  artifacts?: Artifact[];
-  reviewRequired?: boolean;
-  reviewedAt?: string;
-  lastProgressAt?: string;
-  lastProgressMessage?: string;
-}
-
-// Cap live-output responses so an unbounded log can't blow up the JSON payload.
-// Matches the 100KB tail truncation that report.sh applies at end-of-run.
-const LIVE_OUTPUT_TAIL_BYTES = 102_400;
-
-function readRunFiles(): RunRecord[] {
-  if (!fs.existsSync(RUNS_DIR)) return [];
-
-  const files = fs.readdirSync(RUNS_DIR).filter((f) => f.endsWith(".json"));
-  const runs: RunRecord[] = [];
-
-  for (const file of files) {
-    try {
-      const raw = fs.readFileSync(path.join(RUNS_DIR, file), "utf-8");
-      const record = JSON.parse(raw) as RunRecord;
-      runs.push(record);
-    } catch {
-      // Skip malformed files
-    }
-  }
-
-  // Sort by start time, newest first
-  runs.sort((a, b) => (b.startEpoch || 0) - (a.startEpoch || 0));
-  return runs;
-}
-
-// GET /api/runs — list recent runs (without full output for performance)
-app.get("/api/runs", (_req, res) => {
-  const limit = parseInt((_req.query.limit as string) || "50", 10);
-  const category = _req.query.category as string | undefined;
-
-  let runs = readRunFiles();
-
-  if (category) {
-    runs = runs.filter((r) => r.category === category);
-  }
-
-  // Drop suppressed artifacts so reviewed / archived items don't reappear on
-  // subsequent agent runs. Filter is applied per-record so an empty artifact
-  // list still surfaces the run itself (the user may want to see the summary).
-  const suppressed = readSuppressed();
-  for (const r of runs) {
-    applySuppressionFilter(r, suppressed);
-  }
-
-  // Strip output from list view to keep the response lean
-  const summary = runs.slice(0, limit).map(({ output: _output, ...rest }) => rest);
-  res.json(summary);
-});
-
-function readLiveOutputTail(id: string): string | null {
-  const outputFile = path.join(RUNS_DIR, `${id}.output`);
-  if (!fs.existsSync(outputFile)) return null;
-  try {
-    const stat = fs.statSync(outputFile);
-    if (stat.size === 0) return "";
-    const start = Math.max(0, stat.size - LIVE_OUTPUT_TAIL_BYTES);
-    const fd = fs.openSync(outputFile, "r");
-    try {
-      const len = stat.size - start;
-      const buf = Buffer.alloc(len);
-      fs.readSync(fd, buf, 0, len, start);
-      return buf.toString("utf-8");
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return null;
-  }
-}
-
-// GET /api/runs/:id — get a single run with full output.
-// For running runs, the live tail of the .output file is stitched in so the
-// dashboard can show progress mid-flight. Once the run ends, report.sh writes
-// the final output into the JSON and deletes the .output file.
-app.get("/api/runs/:id", (req, res) => {
-  const runFile = path.join(RUNS_DIR, `${req.params.id}.json`);
-
-  if (!fs.existsSync(runFile)) {
-    res.status(404).json({ error: "Run not found" });
-    return;
-  }
-
-  try {
-    const raw = fs.readFileSync(runFile, "utf-8");
-    const record = JSON.parse(raw) as RunRecord;
-    if (record.status === "running") {
-      const live = readLiveOutputTail(req.params.id);
-      if (live !== null) record.output = live;
-    }
-    applySuppressionFilter(record, readSuppressed());
-    res.json(record);
-  } catch {
-    res.status(500).json({ error: "Failed to read run record" });
-  }
-});
-
-// GET /api/scripts — return the known script registry
-app.get("/api/scripts", (_req, res) => {
-  const registryPath = path.join(__dirname, "..", "lib", "scripts.json");
-  try {
-    const raw = fs.readFileSync(registryPath, "utf-8");
-    res.json(JSON.parse(raw));
-  } catch {
-    res.status(500).json({ error: "Failed to read script registry" });
-  }
-});
-
-// DELETE /api/runs/:id — delete a run record
-app.delete("/api/runs/:id", (req, res) => {
-  const runFile = path.join(RUNS_DIR, `${req.params.id}.json`);
-  const outputFile = path.join(RUNS_DIR, `${req.params.id}.output`);
-
-  if (!fs.existsSync(runFile)) {
-    res.status(404).json({ error: "Run not found" });
-    return;
-  }
-
-  try {
-    fs.unlinkSync(runFile);
-    if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
-    res.json({ deleted: true });
-  } catch {
-    res.status(500).json({ error: "Failed to delete run record" });
-  }
-});
-
-// POST /api/runs/cleanup — delete old runs.
-// Body: { completedDays?: number, failedDays?: number, days?: number }
-//   - success runs older than completedDays are pruned
-//   - failed/killed runs older than failedDays are pruned
-//   - running runs are never touched
-//   - `days` is a legacy alias that applies to both when the specific fields are absent
-app.post("/api/runs/cleanup", (req, res) => {
-  const body = (req.body ?? {}) as {
-    days?: number | string;
-    completedDays?: number | string;
-    failedDays?: number | string;
-  };
-  const legacyDays = body.days != null ? Number(body.days) : undefined;
-  const completedDays = Number(body.completedDays ?? legacyDays ?? 7);
-  const failedDays = Number(body.failedDays ?? legacyDays ?? 30);
-
-  if (
-    !Number.isFinite(completedDays) ||
-    !Number.isFinite(failedDays) ||
-    completedDays < 0 ||
-    failedDays < 0
-  ) {
-    res.status(400).json({
-      error: "completedDays and failedDays must be non-negative numbers",
-    });
-    return;
-  }
-
-  const now = Date.now() / 1000;
-  const completedCutoff = now - completedDays * 86400;
-  const failedCutoff = now - failedDays * 86400;
-
-  const runs = readRunFiles();
-  let deletedCompleted = 0;
-  let deletedFailed = 0;
-
-  for (const run of runs) {
-    if (run.status === "running") continue;
-    const cutoff = run.status === "success" ? completedCutoff : failedCutoff;
-    if (run.startEpoch >= cutoff) continue;
-
-    const runFile = path.join(RUNS_DIR, `${run.id}.json`);
-    const outputFile = path.join(RUNS_DIR, `${run.id}.output`);
-    try {
-      fs.unlinkSync(runFile);
-      if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
-      if (run.status === "success") deletedCompleted++;
-      else deletedFailed++;
-    } catch {
-      // Skip files that can't be deleted
-    }
-  }
-
-  res.json({
-    deleted: deletedCompleted + deletedFailed,
-    deletedCompleted,
-    deletedFailed,
-    completedDays,
-    failedDays,
-  });
-});
-
-// POST /api/runs/sweep-stale — mark runs stuck in "running" past the threshold
-// as killed. Also runs on a timer and at server startup; this endpoint exists
-// so callers (CLI, tests) can force a sweep without waiting.
-app.post("/api/runs/sweep-stale", (_req, res) => {
-  const thresholdMs = STALE_RUN_THRESHOLD_MINUTES * 60 * 1000;
-  const result = sweepStaleRunning(RUNS_DIR, thresholdMs);
-  if (result.sweptIds.length > 0) broadcastUpdate();
-  res.json({
-    thresholdMinutes: STALE_RUN_THRESHOLD_MINUTES,
-    ...result,
-  });
-});
-
-// --- Review state mutation ---
-
-function readRunFile(id: string): RunRecord | null {
-  const runFile = path.join(RUNS_DIR, `${id}.json`);
-  if (!fs.existsSync(runFile)) return null;
-  try {
-    const raw = fs.readFileSync(runFile, "utf-8");
-    return JSON.parse(raw) as RunRecord;
-  } catch {
-    return null;
-  }
-}
-
-function writeRunFileAtomic(id: string, record: RunRecord): void {
-  const runFile = path.join(RUNS_DIR, `${id}.json`);
-  const tmp = `${runFile}.tmp.${process.pid}.${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(record, null, 2), "utf-8");
-  fs.renameSync(tmp, runFile);
-}
-
-app.post("/api/runs/:id/reviewed", (req, res) => {
-  const record = readRunFile(req.params.id);
-  if (!record) {
-    res.status(404).json({ error: "Run not found" });
-    return;
-  }
-  record.reviewedAt = new Date().toISOString();
-  try {
-    writeRunFileAtomic(req.params.id, record);
-    res.json(record);
-  } catch (err) {
-    console.error(`[reviewed] failed to write run ${req.params.id}:`, err);
-    res.status(500).json({ error: "Failed to write run record" });
-  }
-});
-
-app.delete("/api/runs/:id/reviewed", (req, res) => {
-  const record = readRunFile(req.params.id);
-  if (!record) {
-    res.status(404).json({ error: "Run not found" });
-    return;
-  }
-  delete record.reviewedAt;
-  try {
-    writeRunFileAtomic(req.params.id, record);
-    res.json(record);
-  } catch (err) {
-    console.error(`[unreviewed] failed to write run ${req.params.id}:`, err);
-    res.status(500).json({ error: "Failed to write run record" });
-  }
-});
-
-// Per-artifact reviewed state. The run is implicitly marked reviewed when ALL
-// its artifacts have a reviewedAt timestamp, so the Needs Review queue still
-// clears even without the legacy run-level button.
-app.post("/api/runs/:id/artifacts/reviewed", (req, res) => {
-  const targetPath =
-    typeof req.body?.path === "string" ? req.body.path : null;
-  if (!targetPath) {
-    res.status(400).json({ error: "Missing artifact path in body" });
-    return;
-  }
-  const record = readRunFile(req.params.id);
-  if (!record) {
-    res.status(404).json({ error: "Run not found" });
-    return;
-  }
-  const artifacts = record.artifacts ?? [];
-  const target = artifacts.find((a) => a.path === targetPath);
-  if (!target) {
-    res.status(404).json({ error: "Artifact not found on run" });
-    return;
-  }
-  target.reviewedAt = new Date().toISOString();
-
-  // Rollup uses the SAME visible-to-user view that applySuppressionFilter
-  // computes at read time. Artifacts whose paths are already in the
-  // suppression registry (archived or reviewed-via-another-run) don't appear
-  // in the dashboard, so they must not block the run from clearing.
-  const suppressed = readSuppressed();
-  const visible = artifacts.filter(
-    (a) => !(a.path in suppressed) || !!a.reviewedAt,
+function runStaleSweep(config: AppConfig, broadcast: () => void): void {
+  const thresholdMs = config.staleThresholdMinutes * 60 * 1000;
+  const { sweptIds } = sweepStaleRunning(
+    config.runsDir,
+    thresholdMs,
+    Date.now(),
+    STALE_CATEGORY_OVERRIDES_MS,
   );
-  if (
-    visible.length > 0 &&
-    visible.every((a) => !!a.reviewedAt) &&
-    !record.reviewedAt
-  ) {
-    record.reviewedAt = target.reviewedAt;
-  }
-
-  try {
-    writeRunFileAtomic(req.params.id, record);
-    addSuppression(target.path, {
-      reason: "reviewed",
-      suppressedAt: target.reviewedAt,
-      viaScript: record.script,
-      viaRunId: record.id,
-    });
-    res.json({ artifact: target, run: record });
-  } catch (err) {
-    console.error(
-      `[artifact-reviewed] failed to write run ${req.params.id}:`,
-      err,
-    );
-    res.status(500).json({ error: "Failed to write run record" });
-  }
-});
-
-app.delete("/api/runs/:id/artifacts/reviewed", (req, res) => {
-  const targetPath =
-    typeof req.body?.path === "string" ? req.body.path : null;
-  if (!targetPath) {
-    res.status(400).json({ error: "Missing artifact path in body" });
-    return;
-  }
-  const record = readRunFile(req.params.id);
-  if (!record) {
-    res.status(404).json({ error: "Run not found" });
-    return;
-  }
-  const artifacts = record.artifacts ?? [];
-  const target = artifacts.find((a) => a.path === targetPath);
-  if (!target) {
-    res.status(404).json({ error: "Artifact not found on run" });
-    return;
-  }
-  delete target.reviewedAt;
-
-  if (record.reviewedAt && artifacts.some((a) => !a.reviewedAt)) {
-    delete record.reviewedAt;
-  }
-
-  try {
-    writeRunFileAtomic(req.params.id, record);
-    // Only clear suppression if the registry entry came from a "reviewed"
-    // action — un-marking reviewed shouldn't undo an "archived" suppression.
-    const reg = readSuppressed();
-    if (reg[target.path]?.reason === "reviewed") {
-      removeSuppression(target.path);
-    }
-    res.json({ artifact: target, run: record });
-  } catch (err) {
-    console.error(
-      `[artifact-unreviewed] failed to write run ${req.params.id}:`,
-      err,
-    );
-    res.status(500).json({ error: "Failed to write run record" });
-  }
-});
-
-// --- Artifact endpoints ---
-
-function handleArtifactError(
-  err: unknown,
-  res: import("express").Response,
-): void {
-  if (err instanceof ArtifactError) {
-    res.status(err.status).json({ error: err.message });
-    return;
-  }
-  console.error("[artifacts] internal error:", err);
-  res.status(500).json({
-    error: "Internal error",
-    detail: err instanceof Error ? err.message : String(err),
-  });
-}
-
-app.get("/api/artifacts", (req, res) => {
-  try {
-    const { absPath } = resolveSafePath(
-      (req.query.path as string) ?? "",
-      ARTIFACTS_CONFIG,
-    );
-    res.json(readArtifact(absPath));
-  } catch (err) {
-    handleArtifactError(err, res);
-  }
-});
-
-app.patch("/api/artifacts", (req, res) => {
-  try {
-    const { absPath } = resolveSafePath(
-      (req.query.path as string) ?? "",
-      ARTIFACTS_CONFIG,
-    );
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const updated = patchArtifact(absPath, {
-      status:
-        typeof body.status === "string" ? body.status : undefined,
-      priority:
-        typeof body.priority === "string" ? body.priority : undefined,
-      appendNote:
-        typeof body.appendNote === "string" ? body.appendNote : undefined,
-    });
-    res.json(updated);
-  } catch (err) {
-    handleArtifactError(err, res);
-  }
-});
-
-app.post("/api/artifacts/archive", (req, res) => {
-  try {
-    const { absPath, root } = resolveSafePath(
-      (req.query.path as string) ?? "",
-      ARTIFACTS_CONFIG,
-    );
-    const result = archiveArtifact(absPath, root);
-    // Suppress BOTH the original and post-archive paths. Original handles
-    // run records that still reference the pre-archive location; new handles
-    // agents (like todo-sync Phase 1.5) that scan the archive folder and
-    // would otherwise re-emit the moved file under its new path.
-    const now = new Date().toISOString();
-    addSuppression(result.originalPath, {
-      reason: "archived",
-      suppressedAt: now,
-    });
-    if (result.newPath !== result.originalPath) {
-      addSuppression(result.newPath, {
-        reason: "archived",
-        suppressedAt: now,
-      });
-    }
-    res.json(result);
-    // Inform any listening clients so the artifact disappears from the UI.
-    broadcastUpdate();
-  } catch (err) {
-    handleArtifactError(err, res);
-  }
-});
-
-// --- JIRA reconciliation endpoints ---
-
-function handleJiraError(
-  err: unknown,
-  res: import("express").Response,
-): void {
-  if (err instanceof JiraError) {
-    res.status(err.status).json({ error: err.message, detail: err.detail });
-    return;
-  }
-  console.error("[jira] internal error:", err);
-  res.status(500).json({
-    error: "Internal error",
-    detail: err instanceof Error ? err.message : String(err),
-  });
-}
-
-function requireJira(res: import("express").Response): JiraClient | null {
-  if (!JIRA) {
-    res
-      .status(503)
-      .json({ error: "JIRA integration is not configured on this server." });
-    return null;
-  }
-  return JIRA;
-}
-
-function validJiraKey(
-  key: string,
-  res: import("express").Response,
-): boolean {
-  if (!JIRA_KEY_PATTERN.test(key)) {
-    res.status(400).json({ error: "Invalid JIRA key" });
-    return false;
-  }
-  return true;
-}
-
-// GET /api/jira/:key/transitions — list the workflow transitions currently
-// valid for this issue. Powers the "Local wins → push to JIRA" status
-// dropdown. Returns `[{ id, name, toStatus }]`.
-app.get("/api/jira/:key/transitions", async (req, res) => {
-  const jira = requireJira(res);
-  if (!jira) return;
-  if (!validJiraKey(req.params.key, res)) return;
-  try {
-    const transitions = await jira.listTransitions(req.params.key);
-    res.json({ key: req.params.key, transitions });
-  } catch (err) {
-    handleJiraError(err, res);
-  }
-});
-
-// POST /api/jira/:key/transition — apply a workflow transition by id.
-// Body: `{ transitionId: "21" }`. The id comes from the transitions list above.
-app.post("/api/jira/:key/transition", async (req, res) => {
-  const jira = requireJira(res);
-  if (!jira) return;
-  if (!validJiraKey(req.params.key, res)) return;
-  const body = (req.body ?? {}) as { transitionId?: unknown };
-  if (typeof body.transitionId !== "string" || body.transitionId.length === 0) {
-    res.status(400).json({ error: "transitionId (string) is required" });
-    return;
-  }
-  try {
-    await jira.transitionIssue(req.params.key, body.transitionId);
-    // getIssue already includes the key in its result.
-    const summary = await jira.getIssue(req.params.key);
-    res.json(summary);
-  } catch (err) {
-    handleJiraError(err, res);
-  }
-});
-
-// POST /api/artifacts/pull-jira?path=...
-// Body: `{ jiraKey: "SM-609", field: "status" }`.
-// Fetches the current value from JIRA and writes it into the local Task Note.
-// `field` is constrained to the JIRA_PULLABLE_FIELDS allowlist.
-app.post("/api/artifacts/pull-jira", async (req, res) => {
-  const jira = requireJira(res);
-  if (!jira) return;
-  try {
-    const { absPath } = resolveSafePath(
-      (req.query.path as string) ?? "",
-      ARTIFACTS_CONFIG,
-    );
-    const body = (req.body ?? {}) as {
-      jiraKey?: unknown;
-      field?: unknown;
-    };
-    if (typeof body.jiraKey !== "string" || !JIRA_KEY_PATTERN.test(body.jiraKey)) {
-      res.status(400).json({ error: "jiraKey is required and must look like ABC-123" });
-      return;
-    }
-    if (typeof body.field !== "string" || !isJiraPullableField(body.field)) {
-      res.status(400).json({
-        error:
-          "field must be one of: status, jiraStatus, sprint, jiraLabels, assignee",
-      });
-      return;
-    }
-    const summary = await jira.getIssue(body.jiraKey);
-
-    // Two write modes:
-    //
-    // - `status`: this is the local-taxonomy field (lowercase, hyphen-
-    //   separated, drives Dataview + the Task Notes plugin). We MUST run the
-    //   JIRA status through the canonical mapping before writing, otherwise
-    //   we'd inject JIRA's title-case "In Progress" into a field that's
-    //   supposed to hold "in-progress". We also refresh `jiraStatus` with
-    //   the raw JIRA value in the same write so the two stay in sync.
-    //
-    // - `jiraStatus`: snapshot field. Always raw JIRA text. No mapping.
-    //
-    // - everything else (sprint, labels, assignee): write verbatim.
-    let updated;
-    let mappingWarning: string | null = null;
-
-    if (body.field === "status") {
-      const localStatus = jiraToLocalStatus(summary.status, STATUS_MAPPING);
-      if (localStatus === null) {
-        // Unmappable: write the snapshot only, leave local `status` alone.
-        // The dashboard will surface the warning so Will can decide manually.
-        updated = setArtifactField(absPath, "jiraStatus", summary.status);
-        mappingWarning = `No local mapping for JIRA status "${summary.status}". Updated jiraStatus snapshot; local status field left unchanged.`;
-      } else {
-        updated = setArtifactFields(absPath, {
-          status: localStatus,
-          jiraStatus: summary.status,
-        });
-      }
-    } else if (body.field === "jiraStatus") {
-      updated = setArtifactField(absPath, "jiraStatus", summary.status);
-    } else {
-      let value: unknown;
-      switch (body.field) {
-        case "sprint":
-          value = summary.sprint ?? null;
-          break;
-        case "jiraLabels":
-          value = summary.labels;
-          break;
-        case "assignee":
-          value = summary.assignee ?? null;
-          break;
-      }
-      updated = setArtifactField(absPath, body.field, value);
-    }
-    res.json({
-      jira: summary,
-      artifact: updated,
-      ...(mappingWarning ? { warning: mappingWarning } : {}),
-    });
-    broadcastUpdate();
-  } catch (err) {
-    if (err instanceof ArtifactError) {
-      handleArtifactError(err, res);
-      return;
-    }
-    handleJiraError(err, res);
-  }
-});
-
-// GET /api/jira/status-mapping — returns the canonical JIRA → local status
-// map so the UI can preview the mapped value (e.g., "JIRA wins → in-progress")
-// before the user clicks. Static at runtime — file is read once at startup.
-app.get("/api/jira/status-mapping", (_req, res) => {
-  // Serialize the Map as a plain object: { normalizedJiraKey: localStatus }.
-  // Callers do their own normalization on the JIRA name before lookup.
-  const entries: Record<string, string> = {};
-  for (const [k, v] of STATUS_MAPPING.lookup) entries[k] = v;
-  res.json({ mappings: entries });
-});
-
-// POST /api/artifacts/snooze?path=...
-// Body: `{ untilDate: "2026-06-01" }`. Adds `sync-mute-until` so the next
-// todo-sync run skips this note until the date passes.
-app.post("/api/artifacts/snooze", (req, res) => {
-  try {
-    const { absPath } = resolveSafePath(
-      (req.query.path as string) ?? "",
-      ARTIFACTS_CONFIG,
-    );
-    const body = (req.body ?? {}) as { untilDate?: unknown };
-    if (typeof body.untilDate !== "string") {
-      res.status(400).json({ error: "untilDate (YYYY-MM-DD) is required" });
-      return;
-    }
-    const updated = snoozeArtifact(absPath, body.untilDate);
-    res.json(updated);
-    broadcastUpdate();
-  } catch (err) {
-    handleArtifactError(err, res);
-  }
-});
-
-// --- Server-Sent Events for live updates ---
-
-const sseClients = new Set<import("express").Response>();
-
-app.get("/api/events", (_req, res) => {
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-  });
-  res.write(":\n\n"); // SSE comment to establish connection
-
-  sseClients.add(res);
-  _req.on("close", () => sseClients.delete(res));
-});
-
-function broadcastUpdate() {
-  const data = JSON.stringify({ type: "update", timestamp: Date.now() });
-  for (const client of sseClients) {
-    client.write(`data: ${data}\n\n`);
-  }
-}
-
-// Watch the runs directory for changes
-if (!fs.existsSync(RUNS_DIR)) {
-  fs.mkdirSync(RUNS_DIR, { recursive: true });
-}
-
-let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-fs.watch(RUNS_DIR, (_eventType, filename) => {
-  // Only react to JSON file changes (ignore .output and .tmp files)
-  if (!filename?.endsWith(".json")) return;
-
-  // Debounce: report.sh writes a .tmp then renames, so we may get
-  // multiple events in quick succession for a single logical update
-  if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => {
-    broadcastUpdate();
-    debounceTimer = null;
-  }, 300);
-});
-
-// Serve the built frontend (production). Registered after all /api routes so
-// the SPA fallback can't shadow them.
-const distDir = path.join(__dirname, "..", "dist");
-if (fs.existsSync(distDir)) {
-  app.use(express.static(distDir));
-  app.get(/^\/(?!api\/).*/, (_req, res) => {
-    res.sendFile(path.join(distDir, "index.html"));
-  });
-}
-
-function runStaleSweep(): void {
-  const thresholdMs = STALE_RUN_THRESHOLD_MINUTES * 60 * 1000;
-  const { sweptIds } = sweepStaleRunning(RUNS_DIR, thresholdMs);
   if (sweptIds.length > 0) {
     console.log(
       `[stale-sweep] marked ${sweptIds.length} run(s) killed:`,
       sweptIds.join(", "),
     );
-    broadcastUpdate();
+    broadcast();
   }
 }
 
-app.listen(PORT, () => {
-  console.log(`Script Dashboard API running on http://localhost:${PORT}`);
-  console.log(`Reading runs from: ${RUNS_DIR}`);
-  console.log(`SSE endpoint: http://localhost:${PORT}/api/events`);
-  console.log(
-    `Stale-run sweep: threshold=${STALE_RUN_THRESHOLD_MINUTES}min, interval=${
-      STALE_RUN_SWEEP_INTERVAL_MS / 1000
-    }s`,
-  );
-  runStaleSweep();
-  setInterval(runStaleSweep, STALE_RUN_SWEEP_INTERVAL_MS);
-});
+export interface DashboardApp {
+  app: express.Express;
+  broadcastUpdate: () => void;
+  runStaleSweep: () => void;
+}
+
+// Wire every route over an injected config so the app holds no module-level
+// filesystem globals — tests construct it against a temp runs dir, the
+// standalone server constructs it from defaultConfig().
+export function createApp(config: AppConfig): DashboardApp {
+  const app = express();
+  app.use(cors());
+  app.use(express.json());
+
+  const sse = createSse();
+  const ctx: RouteContext = { config, broadcast: sse.broadcast };
+
+  registerRunRoutes(app, ctx);
+  registerArtifactRoutes(app, ctx);
+  registerJiraRoutes(app, ctx);
+
+  app.get("/api/events", sse.handler);
+
+  // Serve the built frontend (production). Registered after all /api routes so
+  // the SPA fallback can't shadow them.
+  const distDir = path.join(__dirname, "..", "dist");
+  if (fs.existsSync(distDir)) {
+    app.use(express.static(distDir));
+    app.get(/^\/(?!api\/).*/, (_req, res) => {
+      res.sendFile(path.join(distDir, "index.html"));
+    });
+  }
+
+  return {
+    app,
+    broadcastUpdate: sse.broadcast,
+    runStaleSweep: () => runStaleSweep(config, sse.broadcast),
+  };
+}
+
+// --- Standalone server bootstrap (skipped when imported by tests) ---
+
+function startServer(): void {
+  const config = defaultConfig();
+  const { app, broadcastUpdate, runStaleSweep: sweep } = createApp(config);
+  const port = parseInt(process.env.PORT || "7890", 10);
+
+  if (!fs.existsSync(config.runsDir)) {
+    fs.mkdirSync(config.runsDir, { recursive: true });
+  }
+
+  // Watch the runs directory and broadcast SSE updates on change.
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  fs.watch(config.runsDir, (_eventType, filename) => {
+    if (!filename?.endsWith(".json")) return; // ignore .output / .tmp
+    // Debounce: report.sh writes a .tmp then renames, so a single logical
+    // update can fire multiple events.
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      broadcastUpdate();
+      debounceTimer = null;
+    }, 300);
+  });
+
+  app.listen(port, () => {
+    console.log(`Script Dashboard API running on http://localhost:${port}`);
+    console.log(`Reading runs from: ${config.runsDir}`);
+    console.log(`SSE endpoint: http://localhost:${port}/api/events`);
+    console.log(
+      `Stale-run sweep: threshold=${config.staleThresholdMinutes}min, interval=${
+        STALE_RUN_SWEEP_INTERVAL_MS / 1000
+      }s`,
+    );
+    sweep();
+    setInterval(sweep, STALE_RUN_SWEEP_INTERVAL_MS);
+  });
+}
+
+// Only boot when run directly (tsx server/index.ts), not when imported by a
+// test that constructs createApp with its own config.
+const invokedDirectly =
+  process.argv[1] && path.resolve(process.argv[1]) === __filename;
+if (invokedDirectly) {
+  startServer();
+}

@@ -4,6 +4,7 @@ import {
   statusVariant,
   timeAgo,
   formatDate,
+  formatTimeRange,
   progressState,
   elapsedSeconds,
 } from "@/utils/formatting";
@@ -100,6 +101,68 @@ describe("formatDate", () => {
     expect(result).toMatch(/Fri/);
     expect(result).toMatch(/Apr/);
     expect(result).toMatch(/10/);
+  });
+});
+
+// --- formatTimeRange ---
+
+describe("formatTimeRange", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-16T12:00:00"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("drops 'Today' for same-day-today ranges", () => {
+    const result = formatTimeRange(
+      "2026-04-16T11:47:00",
+      "2026-04-16T11:49:00",
+    );
+    expect(result).not.toMatch(/Today/);
+    expect(result).toMatch(/11:47/);
+    expect(result).toMatch(/11:49/);
+    expect(result).toContain("–");
+  });
+
+  it("collapses same-minute ranges to a single time", () => {
+    const result = formatTimeRange(
+      "2026-04-16T11:27:10",
+      "2026-04-16T11:27:50",
+    );
+    expect(result).not.toContain("–");
+    expect(result).toMatch(/11:27/);
+  });
+
+  it("includes date label for non-today same-day ranges", () => {
+    const result = formatTimeRange(
+      "2026-04-15T10:00:00",
+      "2026-04-15T11:00:00",
+    );
+    expect(result).toMatch(/Yesterday/);
+    expect(result).toMatch(/10:00/);
+    expect(result).toMatch(/11:00/);
+  });
+
+  it("shows both dates for cross-day ranges", () => {
+    const result = formatTimeRange(
+      "2026-04-15T23:50:00",
+      "2026-04-16T00:10:00",
+    );
+    expect(result).toMatch(/Yesterday/);
+    expect(result).toMatch(/Today/);
+  });
+
+  it("collapses same-minute same-day-not-today ranges", () => {
+    const result = formatTimeRange(
+      "2026-04-15T09:00:00",
+      "2026-04-15T09:00:30",
+    );
+    expect(result).toMatch(/Yesterday/);
+    expect(result).toMatch(/9:00/);
+    expect(result).not.toContain("–");
   });
 });
 

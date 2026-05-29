@@ -1,9 +1,29 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { RunRecord, ScriptRegistry } from "@/types";
 import { RunCard } from "./RunCard";
+import { RunClusterCard } from "./RunClusterCard";
+import { ChronoFilterChips } from "./ChronoFilterChips";
 import { Separator } from "@/components/ui/separator";
 import { groupByCategory } from "@/utils/groupByCategory";
+import { clusterChronoRuns, type ChronoEntry } from "@/utils/clusterRuns";
+import { formatDate } from "@/utils/formatting";
+
+// Pull the leading run from a chronological entry so we can group adjacent
+// entries by day for the sticky-header timeline. A cluster files under its
+// NEWEST member's day (runs[0]) — deliberate: the cluster sits at its newest
+// member's position in the newest-first list, so labeling it by an older day
+// would clash with where it visually lands. A cluster that straddles midnight
+// shows the full span ("Yesterday … – Today …") in its own card header.
+function entryStartedAt(entry: ChronoEntry): string {
+  return entry.kind === "run"
+    ? entry.run.startedAt
+    : entry.cluster.runs[0].startedAt;
+}
+
+type ChronoItem =
+  | { kind: "day-header"; key: string; label: string }
+  | { kind: "entry"; entry: ChronoEntry };
 
 export type RunListView = "grouped" | "chronological" | "review";
 
@@ -15,11 +35,12 @@ interface RunListProps {
 }
 
 const COLLAPSED_STORAGE_KEY = "script-dashboard:collapsed-categories";
+const CHRONO_FILTER_STORAGE_KEY = "script-dashboard:chrono-filter-disabled";
 
-function loadCollapsed(): Set<string> {
+function loadStringSet(key: string): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem(COLLAPSED_STORAGE_KEY);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return new Set();
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? new Set(parsed) : new Set();
@@ -28,12 +49,24 @@ function loadCollapsed(): Set<string> {
   }
 }
 
+function loadCollapsed(): Set<string> {
+  return loadStringSet(COLLAPSED_STORAGE_KEY);
+}
+
+function loadChronoFilter(): Set<string> {
+  return loadStringSet(CHRONO_FILTER_STORAGE_KEY);
+}
+
 export function RunList({ runs, registry, onExpand, view }: RunListProps) {
-  const scriptMap = new Map(
-    registry?.scripts.map((s) => [s.id, s]) || []
+  const scriptMap = useMemo(
+    () => new Map(registry?.scripts.map((s) => [s.id, s]) || []),
+    [registry],
   );
 
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
+  const [chronoDisabled, setChronoDisabled] = useState<Set<string>>(() =>
+    loadChronoFilter(),
+  );
 
   useEffect(() => {
     try {
@@ -46,6 +79,17 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
     }
   }, [collapsed]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        CHRONO_FILTER_STORAGE_KEY,
+        JSON.stringify(Array.from(chronoDisabled)),
+      );
+    } catch {
+      // ignore
+    }
+  }, [chronoDisabled]);
+
   const toggleCategory = (category: string) => {
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -54,6 +98,42 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
       return next;
     });
   };
+
+  const toggleChronoCategory = (category: string) => {
+    setChronoDisabled((prev) => {
+      const next = new Set(prev);
+      if (next.has(category)) next.delete(category);
+      else next.add(category);
+      return next;
+    });
+  };
+
+  // Derived views, memoized so they don't recompute on every render (e.g. a
+  // 1s ticker inside a running RunCard). Kept above the early returns below so
+  // the hook order stays stable.
+  const chrono = useMemo(() => {
+    const filtered = runs.filter((r) => !chronoDisabled.has(r.category));
+    const entries = clusterChronoRuns(filtered);
+    // Insert day-separator items between entries when the calendar day changes.
+    // Entries are newest-first, so the first item carries the most recent day.
+    const items: ChronoItem[] = [];
+    let prevDayKey = "";
+    for (const entry of entries) {
+      const iso = entryStartedAt(entry);
+      const dayKey = new Date(iso).toDateString();
+      if (dayKey !== prevDayKey) {
+        items.push({ kind: "day-header", key: dayKey, label: formatDate(iso) });
+        prevDayKey = dayKey;
+      }
+      items.push({ kind: "entry", entry });
+    }
+    return { entries, items };
+  }, [runs, chronoDisabled]);
+
+  const grouped = useMemo(
+    () => groupByCategory(runs, registry),
+    [runs, registry],
+  );
 
   if (runs.length === 0) {
     return (
@@ -67,19 +147,59 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
   }
 
   if (view === "chronological") {
-    const sorted = [...runs].sort(
-      (a, b) => (b.startEpoch || 0) - (a.startEpoch || 0)
-    );
+    const { entries, items } = chrono;
+
     return (
-      <div className="space-y-2">
-        {sorted.map((run) => (
-          <RunCard
-            key={run.id}
-            run={run}
-            scriptInfo={scriptMap.get(run.script)}
-            onExpand={onExpand}
-          />
-        ))}
+      <div>
+        <ChronoFilterChips
+          runs={runs}
+          registry={registry}
+          disabled={chronoDisabled}
+          onToggle={toggleChronoCategory}
+        />
+        {entries.length === 0 ? (
+          <div className="text-center py-12 text-muted-foreground">
+            <p className="text-sm">
+              No runs match the current filter. Toggle a chip to bring a
+              category back.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {items.map((item) => {
+              if (item.kind === "day-header") {
+                return (
+                  <div
+                    key={`day-${item.key}`}
+                    className="flex items-center gap-3 pt-4 pb-1 first:pt-0"
+                  >
+                    <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      {item.label}
+                    </h2>
+                    <Separator className="flex-1" />
+                  </div>
+                );
+              }
+              const entry = item.entry;
+              return entry.kind === "cluster" ? (
+                <RunClusterCard
+                  key={`cluster-${entry.cluster.runs[0].id}`}
+                  cluster={entry.cluster}
+                  scriptMap={scriptMap}
+                  onExpand={onExpand}
+                />
+              ) : (
+                <RunCard
+                  key={entry.run.id}
+                  run={entry.run}
+                  scriptInfo={scriptMap.get(entry.run.script)}
+                  onExpand={onExpand}
+                  compactTime
+                />
+              );
+            })}
+          </div>
+        )}
       </div>
     );
   }
@@ -115,8 +235,6 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
       </div>
     );
   }
-
-  const grouped = groupByCategory(runs, registry);
 
   return (
     <div className="space-y-8">

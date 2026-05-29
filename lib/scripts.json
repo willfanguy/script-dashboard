@@ -201,6 +201,12 @@
       "name": "End Task",
       "category": "skill",
       "description": "Update Task Note with status and work log"
+    },
+    {
+      "id": "claude-interactive",
+      "name": "Interactive Session",
+      "category": "interactive",
+      "description": "Claude Code session (pre-enrichment label — replaced by topic at session end)"
     }
   ],
   "categories": {

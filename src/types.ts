@@ -52,6 +52,22 @@ export interface RunRecord {
   reviewedAt?: string;
   lastProgressAt?: string;
   lastProgressMessage?: string;
+  // Interactive-session enrichment, populated by hook-claude-session-end.sh
+  // from the Claude Code JSONL transcript. Optional and best-effort — older
+  // records simply lack these fields.
+  topic?: string;
+  outcome?: string;
+  // Claude Code's auto-generated (or user-renamed) conversation title.
+  // Refined throughout the session — UI displays the latest value as the
+  // primary identity (preferred over `topic` because it's tighter).
+  customTitle?: string;
+  gitBranch?: string;
+  tools?: {
+    total: number;
+    bash?: number;
+    edit?: number;
+    subagent?: number;
+  };
 }
 
 export interface ArtifactDetail {

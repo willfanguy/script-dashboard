@@ -47,6 +47,36 @@ export function formatDate(iso: string): string {
   });
 }
 
+// Format a time range for a cluster header. Drops redundant "Today" when
+// both ends fall on today, drops the second date if same-day. Collapses
+// to a single time when start and end land on the same minute.
+export function formatTimeRange(
+  earliestISO: string,
+  latestISO: string,
+): string {
+  const earliest = new Date(earliestISO);
+  const latest = new Date(latestISO);
+  const sameDay = earliest.toDateString() === latest.toDateString();
+
+  if (!sameDay) {
+    return `${formatDate(earliestISO)} ${formatTime(earliestISO)} – ${formatDate(latestISO)} ${formatTime(latestISO)}`;
+  }
+
+  const earliestTime = formatTime(earliestISO);
+  const latestTime = formatTime(latestISO);
+  const dateLabel = formatDate(earliestISO);
+  const isToday = dateLabel === "Today";
+
+  // Same minute (likely several quick sessions): single time reads tighter.
+  if (earliestTime === latestTime) {
+    return isToday ? earliestTime : `${dateLabel}, ${earliestTime}`;
+  }
+
+  return isToday
+    ? `${earliestTime} – ${latestTime}`
+    : `${dateLabel}, ${earliestTime} – ${latestTime}`;
+}
+
 export function timeAgo(iso: string): string {
   const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
   if (seconds < 60) return "just now";
