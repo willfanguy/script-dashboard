@@ -24,14 +24,24 @@ import {
   ChevronRight,
   Clock,
   Archive,
+  RotateCcw,
+  Eraser,
 } from "lucide-react";
 import { ArtifactReview } from "@/components/ArtifactReview";
 import { archiveArtifact } from "@/lib/artifacts-api";
+import { CategoryGlyph } from "@/utils/categoryIcons";
+import { splitWorkspace, splitSource } from "@/utils/parseWorkspace";
+import { workspaceColor } from "@/utils/workspaceColor";
 
 interface RunCardProps {
   run: RunRecord;
   scriptInfo?: ScriptInfo;
   onExpand: (id: string) => Promise<RunRecord | null>;
+  // When true, the row's timestamp omits the date prefix (e.g. "1:11 PM"
+  // instead of "Today 1:11 PM"). Set by parents that already display the
+  // date via a day header above the row (chronological view, cluster
+  // expansion). Defaults to false for views where each row needs full date.
+  compactTime?: boolean;
 }
 
 function StatusIcon({ status }: { status: RunRecord["status"] }) {
@@ -50,7 +60,12 @@ function StatusIcon({ status }: { status: RunRecord["status"] }) {
 const RUNNING_TICK_MS = 1_000;
 const RUNNING_OUTPUT_POLL_MS = 3_000;
 
-export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
+export function RunCard({
+  run,
+  scriptInfo,
+  onExpand,
+  compactTime = false,
+}: RunCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [output, setOutput] = useState<string | null>(null);
   const [loadingOutput, setLoadingOutput] = useState(false);
@@ -69,13 +84,29 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
 
+  // Adopt fresh artifact / review state when the server pushes new data for
+  // this run. use-runs replaces the whole list on each SSE refetch, but this
+  // card instance persists (stable key=run.id), so the useState initializers
+  // above only ran once at mount. Without this, an artifact reviewed/archived
+  // in another tab — or auto-derived server-side — would never reach the card.
+  // Keyed on serialized content so an identical refetch neither clobbers a
+  // local optimistic edit nor churns renders.
+  const serverArtifactsKey = JSON.stringify(run.artifacts ?? []);
+  useEffect(() => {
+    setArtifacts(run.artifacts ?? []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverArtifactsKey]);
+  useEffect(() => {
+    setReviewedAt(run.reviewedAt);
+  }, [run.reviewedAt]);
+
   const isRunning = run.status === "running";
 
   const handleToggle = async () => {
     if (!expanded && output === null) {
       setLoadingOutput(true);
       const detail = await onExpand(run.id);
-      setOutput(detail?.output || "(no output captured)");
+      setOutput(detail?.output || "");
       setLoadingOutput(false);
     }
     setExpanded(!expanded);
@@ -98,7 +129,10 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
     if (!expanded || !isRunning) return;
     pollRef.current = setInterval(async () => {
       const detail = await onExpand(run.id);
-      if (detail) setOutput(detail.output || "(no output captured)");
+      // Use "" (not a literal fallback) so the render-time placeholder logic
+      // owns the empty-output message — otherwise a running session's
+      // synthesized "Session in progress…" text gets clobbered on each poll.
+      if (detail) setOutput(detail.output || "");
     }, RUNNING_OUTPUT_POLL_MS);
     return () => {
       if (pollRef.current) {
@@ -112,12 +146,41 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
   const needsReview = !!run.reviewRequired && !reviewedAt;
   const hasArtifacts = artifacts.length > 0;
   const showReviewPane = hasArtifacts || run.reviewRequired;
+  // Pull source kind (resumed/cleared) and workspace into structured chips on
+  // the title row, leaving the description line as a clean cwd. Two passes:
+  // splitSource first (handles both new and legacy formats), then splitWorkspace
+  // on the residue.
+  const { description: descAfterSource, sourceKind } = splitSource(
+    run.description,
+  );
+  const { description: cleanedDescription, workspace } =
+    splitWorkspace(descAfterSource);
 
   // Live running-run readouts. For running runs we prefer elapsed-since-start
   // over the stored duration (which is only written at report_end).
   const runningElapsed = isRunning ? elapsedSeconds(run.startedAt) : null;
   const progress = progressState(run.lastProgressAt);
-  const showStallBorder = isRunning && progress === "stalled";
+
+  // Interactive sessions get "idle" instead of "stalled" when their last
+  // response is >5 min old — the stronger word fits scripted hangs, not
+  // expected pauses in a chat. Border behavior follows the same logic so
+  // an "idle" row doesn't carry an alarming red stripe.
+  const isInteractive = run.category === "interactive";
+  const stalledLabel = isInteractive ? "idle" : "stalled";
+  const stalledLastIso = run.lastProgressAt
+    ? new Date(run.lastProgressAt).toLocaleString()
+    : "";
+  const heartbeatTooltip = run.lastProgressAt
+    ? progress === "stalled"
+      ? `${isInteractive ? "No messages exchanged" : "No activity"} for 5+ min. Last: ${stalledLastIso}`
+      : progress === "slow"
+        ? `Last activity 1-5 min ago. Last: ${stalledLastIso}`
+        : `Active — last activity ${stalledLastIso}`
+    : "";
+
+  // Red stripe only for non-interactive stalls — interactive "idle" is expected.
+  const showStallBorder =
+    isRunning && progress === "stalled" && !isInteractive;
 
   const archivableArtifacts = artifacts.filter((a) => a.type === "task-note");
 
@@ -166,16 +229,56 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
       >
         <CollapsibleTrigger className="w-full cursor-pointer">
           <div className="flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors">
+            <CategoryGlyph
+              category={run.category}
+              className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0"
+            />
             <StatusIcon status={run.status} />
 
             <div className="flex-1 text-left min-w-0">
               <div className="flex items-center gap-2">
-                <span className="font-medium text-sm truncate">
-                  {displayName}
+                <span
+                  className="font-medium text-sm truncate"
+                  title={run.customTitle ?? run.topic ?? displayName}
+                >
+                  {run.customTitle ??
+                    (run.topic ? `“${run.topic}”` : displayName)}
                 </span>
-                <Badge variant={statusVariant(run.status)} className="text-xs">
-                  {run.status}
-                </Badge>
+                {run.status !== "running" && (
+                  <Badge
+                    variant={statusVariant(run.status)}
+                    className="text-xs"
+                  >
+                    {run.status}
+                  </Badge>
+                )}
+                {workspace && (
+                  <Badge
+                    variant="outline"
+                    className={`text-xs ${workspaceColor(workspace)}`}
+                    title={`cmux workspace: ${workspace}`}
+                  >
+                    {workspace}
+                  </Badge>
+                )}
+                {sourceKind && (
+                  <Badge
+                    variant="outline"
+                    className="text-xs text-muted-foreground gap-1 font-normal"
+                    title={
+                      sourceKind === "resumed"
+                        ? "Resumed from a prior session — same conversation continued"
+                        : "Started after the previous session was cleared (/clear)"
+                    }
+                  >
+                    {sourceKind === "resumed" ? (
+                      <RotateCcw className="h-3 w-3" />
+                    ) : (
+                      <Eraser className="h-3 w-3" />
+                    )}
+                    {sourceKind}
+                  </Badge>
+                )}
                 {run.exitCode !== undefined && run.exitCode !== 0 && (
                   <span className="text-xs text-muted-foreground">
                     exit {run.exitCode}
@@ -189,18 +292,20 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
                         ? "border-green-500 text-green-600"
                         : progress === "slow"
                           ? "border-amber-500 text-amber-600"
-                          : "border-red-500 text-red-600"
+                          : isInteractive
+                            ? "border-amber-500 text-amber-600"
+                            : "border-red-500 text-red-600"
                     }`}
-                    title={`Last progress: ${new Date(run.lastProgressAt).toLocaleString()}`}
+                    title={heartbeatTooltip}
                   >
-                    {progress === "stalled" ? "stalled" : "active"} ·{" "}
+                    {progress === "stalled" ? stalledLabel : "active"} ·{" "}
                     {timeAgo(run.lastProgressAt)}
                   </Badge>
                 )}
                 {isRunning && !run.lastProgressAt && (
                   <span
                     className="text-xs text-muted-foreground"
-                    title="Script has not reported progress yet (uses report_log only, or no reporting)"
+                    title="No heartbeat yet — session just started, or this script doesn't report progress."
                   >
                     no heartbeat
                   </span>
@@ -224,15 +329,41 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
                 <p className="text-xs text-muted-foreground truncate mt-0.5 font-mono">
                   {run.lastProgressMessage}
                 </p>
-              ) : run.description ? (
+              ) : cleanedDescription ? (
                 <p className="text-xs text-muted-foreground truncate mt-0.5">
-                  {run.description}
+                  {cleanedDescription}
                 </p>
               ) : scriptInfo?.description ? (
                 <p className="text-xs text-muted-foreground truncate mt-0.5">
                   {scriptInfo.description}
                 </p>
               ) : null}
+              {run.outcome && (
+                <p
+                  className="text-xs text-muted-foreground/80 truncate mt-0.5"
+                  title={run.outcome}
+                >
+                  → {run.outcome}
+                </p>
+              )}
+              {(run.gitBranch || (run.tools && run.tools.total > 0)) && (
+                <p className="text-xs text-muted-foreground/70 truncate mt-0.5">
+                  {[
+                    run.gitBranch ? `branch: ${run.gitBranch}` : null,
+                    run.tools?.total
+                      ? `${run.tools.total} tool${run.tools.total === 1 ? "" : "s"}`
+                      : null,
+                    run.tools?.edit
+                      ? `${run.tools.edit} edit${run.tools.edit === 1 ? "" : "s"}`
+                      : null,
+                    run.tools?.subagent
+                      ? `${run.tools.subagent} subagent${run.tools.subagent === 1 ? "" : "s"}`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+              )}
             </div>
 
             <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0">
@@ -251,10 +382,9 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
                 </span>
               ) : null}
               <span title={new Date(run.startedAt).toLocaleString()}>
-                {formatDate(run.startedAt)} {formatTime(run.startedAt)}
-              </span>
-              <span className="text-muted-foreground/60">
-                {timeAgo(run.startedAt)}
+                {compactTime
+                  ? formatTime(run.startedAt)
+                  : `${formatDate(run.startedAt)} ${formatTime(run.startedAt)}`}
               </span>
               <ChevronRight
                 className={`h-4 w-4 transition-transform ${expanded ? "rotate-90" : ""}`}
@@ -273,7 +403,31 @@ export function RunCard({ run, scriptInfo, onExpand }: RunCardProps) {
             ) : (
               <div className="max-h-80 overflow-y-auto">
                 <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground/80">
-                  {output}
+                  {(() => {
+                    // For running enriched sessions, the .output file isn't
+                    // finalized yet — but we have the topic and a live
+                    // progress message. Render a synthesized placeholder so
+                    // expand surfaces useful info instead of "no output captured".
+                    if (output) return output;
+                    const parts: string[] = [];
+                    if (run.topic) parts.push(`Topic:\n${run.topic}`);
+                    if (run.lastProgressMessage) {
+                      parts.push(
+                        `Last activity:\n${run.lastProgressMessage}`,
+                      );
+                    }
+                    if (parts.length > 0) {
+                      parts.push(
+                        isRunning
+                          ? "(Session in progress — output will be captured at session end.)"
+                          : "(No output captured for this run.)",
+                      );
+                      return parts.join("\n\n");
+                    }
+                    return isRunning
+                      ? "(Session in progress — output will be captured at session end.)"
+                      : "(No output captured for this run.)";
+                  })()}
                 </pre>
               </div>
             )}

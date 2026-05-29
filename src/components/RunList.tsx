@@ -2,8 +2,20 @@ import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { RunRecord, ScriptRegistry } from "@/types";
 import { RunCard } from "./RunCard";
+import { RunClusterCard } from "./RunClusterCard";
+import { ChronoFilterChips } from "./ChronoFilterChips";
 import { Separator } from "@/components/ui/separator";
 import { groupByCategory } from "@/utils/groupByCategory";
+import { clusterChronoRuns, type ChronoEntry } from "@/utils/clusterRuns";
+import { formatDate } from "@/utils/formatting";
+
+// Pull the leading run from a chronological entry so we can group adjacent
+// entries by day for the sticky-header timeline.
+function entryStartedAt(entry: ChronoEntry): string {
+  return entry.kind === "run"
+    ? entry.run.startedAt
+    : entry.cluster.runs[0].startedAt;
+}
 
 export type RunListView = "grouped" | "chronological" | "review";
 
@@ -15,11 +27,12 @@ interface RunListProps {
 }
 
 const COLLAPSED_STORAGE_KEY = "script-dashboard:collapsed-categories";
+const CHRONO_FILTER_STORAGE_KEY = "script-dashboard:chrono-filter-disabled";
 
-function loadCollapsed(): Set<string> {
+function loadStringSet(key: string): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem(COLLAPSED_STORAGE_KEY);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return new Set();
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? new Set(parsed) : new Set();
@@ -28,12 +41,23 @@ function loadCollapsed(): Set<string> {
   }
 }
 
+function loadCollapsed(): Set<string> {
+  return loadStringSet(COLLAPSED_STORAGE_KEY);
+}
+
+function loadChronoFilter(): Set<string> {
+  return loadStringSet(CHRONO_FILTER_STORAGE_KEY);
+}
+
 export function RunList({ runs, registry, onExpand, view }: RunListProps) {
   const scriptMap = new Map(
     registry?.scripts.map((s) => [s.id, s]) || []
   );
 
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
+  const [chronoDisabled, setChronoDisabled] = useState<Set<string>>(() =>
+    loadChronoFilter(),
+  );
 
   useEffect(() => {
     try {
@@ -46,8 +70,28 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
     }
   }, [collapsed]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        CHRONO_FILTER_STORAGE_KEY,
+        JSON.stringify(Array.from(chronoDisabled)),
+      );
+    } catch {
+      // ignore
+    }
+  }, [chronoDisabled]);
+
   const toggleCategory = (category: string) => {
     setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(category)) next.delete(category);
+      else next.add(category);
+      return next;
+    });
+  };
+
+  const toggleChronoCategory = (category: string) => {
+    setChronoDisabled((prev) => {
       const next = new Set(prev);
       if (next.has(category)) next.delete(category);
       else next.add(category);
@@ -67,19 +111,82 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
   }
 
   if (view === "chronological") {
-    const sorted = [...runs].sort(
-      (a, b) => (b.startEpoch || 0) - (a.startEpoch || 0)
-    );
+    const filtered = runs.filter((r) => !chronoDisabled.has(r.category));
+    const entries = clusterChronoRuns(filtered);
+
+    // Insert day-separator items between entries when the calendar day
+    // changes. Entries are sorted newest-first, so the first item carries
+    // the most recent day.
+    type ChronoItem =
+      | { kind: "day-header"; key: string; label: string }
+      | { kind: "entry"; entry: ChronoEntry };
+    const items: ChronoItem[] = [];
+    let prevDayKey = "";
+    for (const entry of entries) {
+      const iso = entryStartedAt(entry);
+      const dayKey = new Date(iso).toDateString();
+      if (dayKey !== prevDayKey) {
+        items.push({
+          kind: "day-header",
+          key: dayKey,
+          label: formatDate(iso),
+        });
+        prevDayKey = dayKey;
+      }
+      items.push({ kind: "entry", entry });
+    }
+
     return (
-      <div className="space-y-2">
-        {sorted.map((run) => (
-          <RunCard
-            key={run.id}
-            run={run}
-            scriptInfo={scriptMap.get(run.script)}
-            onExpand={onExpand}
-          />
-        ))}
+      <div>
+        <ChronoFilterChips
+          runs={runs}
+          registry={registry}
+          disabled={chronoDisabled}
+          onToggle={toggleChronoCategory}
+        />
+        {entries.length === 0 ? (
+          <div className="text-center py-12 text-muted-foreground">
+            <p className="text-sm">
+              No runs match the current filter. Toggle a chip to bring a
+              category back.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {items.map((item) => {
+              if (item.kind === "day-header") {
+                return (
+                  <div
+                    key={`day-${item.key}`}
+                    className="flex items-center gap-3 pt-4 pb-1 first:pt-0"
+                  >
+                    <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      {item.label}
+                    </h2>
+                    <Separator className="flex-1" />
+                  </div>
+                );
+              }
+              const entry = item.entry;
+              return entry.kind === "cluster" ? (
+                <RunClusterCard
+                  key={`cluster-${entry.cluster.runs[0].id}`}
+                  cluster={entry.cluster}
+                  scriptMap={scriptMap}
+                  onExpand={onExpand}
+                />
+              ) : (
+                <RunCard
+                  key={entry.run.id}
+                  run={entry.run}
+                  scriptInfo={scriptMap.get(entry.run.script)}
+                  onExpand={onExpand}
+                  compactTime
+                />
+              );
+            })}
+          </div>
+        )}
       </div>
     );
   }
