@@ -68,7 +68,7 @@ function runidFor(sessionId: string): string {
   return JSON.parse(fs.readFileSync(bridgePath(sessionId), "utf-8")).runid;
 }
 
-function recordByRunId(runid: string): Record<string, any> {
+function recordByRunId(runid: string): Record<string, unknown> {
   return JSON.parse(
     fs.readFileSync(path.join(runsDir, `${runid}.json`), "utf-8"),
   );
