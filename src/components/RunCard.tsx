@@ -1,11 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import { Badge } from "@/components/ui/badge";
-import { Card } from "@/components/ui/card";
+import { CollapsibleRow } from "@/components/CollapsibleRow";
 import type { Artifact, RunRecord, ScriptInfo } from "@/types";
 import {
   statusVariant,
@@ -21,7 +16,6 @@ import {
   XCircle,
   Loader,
   Skull,
-  ChevronRight,
   Clock,
   Archive,
   RotateCcw,
@@ -102,14 +96,14 @@ export function RunCard({
 
   const isRunning = run.status === "running";
 
-  const handleToggle = async () => {
-    if (!expanded && output === null) {
+  const handleToggle = async (next: boolean) => {
+    if (next && output === null) {
       setLoadingOutput(true);
       const detail = await onExpand(run.id);
       setOutput(detail?.output || "");
       setLoadingOutput(false);
     }
-    setExpanded(!expanded);
+    setExpanded(next);
   };
 
   // Live tick while running — drives the elapsed / last-activity readouts.
@@ -217,26 +211,29 @@ export function RunCard({
   };
 
   return (
-    <Collapsible open={expanded} onOpenChange={handleToggle}>
-      <Card
-        className={`p-0 overflow-hidden ${
-          showStallBorder
-            ? "border-l-4 border-l-red-500"
-            : needsReview
-              ? "border-l-4 border-l-amber-500"
-              : ""
-        }`}
-      >
-        <CollapsibleTrigger className="w-full cursor-pointer">
-          <div className="flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors">
-            <CategoryGlyph
-              category={run.category}
-              className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0"
-            />
-            <StatusIcon status={run.status} />
-
-            <div className="flex-1 text-left min-w-0">
-              <div className="flex items-center gap-2">
+    <CollapsibleRow
+      open={expanded}
+      onOpenChange={handleToggle}
+      cardClassName={
+        showStallBorder
+          ? "border-l-4 border-l-red-500"
+          : needsReview
+            ? "border-l-4 border-l-amber-500"
+            : undefined
+      }
+      triggerClassName="px-4 py-3 hover:bg-muted/50"
+      leading={
+        <>
+          <CategoryGlyph
+            category={run.category}
+            className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0"
+          />
+          <StatusIcon status={run.status} />
+        </>
+      }
+      header={
+        <>
+          <div className="flex items-center gap-2">
                 <span
                   className="font-medium text-sm truncate"
                   title={run.customTitle ?? run.topic ?? displayName}
@@ -364,10 +361,11 @@ export function RunCard({
                     .join(" · ")}
                 </p>
               )}
-            </div>
-
-            <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0">
-              {runningElapsed !== null ? (
+        </>
+      }
+      trailing={
+        <>
+          {runningElapsed !== null ? (
                 <span
                   className="flex items-center gap-1"
                   title="Elapsed since start"
@@ -386,15 +384,10 @@ export function RunCard({
                   ? formatTime(run.startedAt)
                   : `${formatDate(run.startedAt)} ${formatTime(run.startedAt)}`}
               </span>
-              <ChevronRight
-                className={`h-4 w-4 transition-transform ${expanded ? "rotate-90" : ""}`}
-              />
-            </div>
-          </div>
-        </CollapsibleTrigger>
-
-        <CollapsibleContent>
-          <div className="border-t px-4 py-3 bg-muted/30 space-y-4">
+        </>
+      }
+    >
+      <div className="border-t px-4 py-3 bg-muted/30 space-y-4">
             {loadingOutput ? (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader className="h-3 w-3 animate-spin" />
@@ -515,8 +508,6 @@ export function RunCard({
               </div>
             )}
           </div>
-        </CollapsibleContent>
-      </Card>
-    </Collapsible>
+    </CollapsibleRow>
   );
 }
