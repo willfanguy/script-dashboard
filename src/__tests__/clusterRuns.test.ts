@@ -171,4 +171,26 @@ describe("clusterChronoRuns", () => {
     ]);
     expect(out.map((e) => e.kind)).toEqual(["run", "run"]);
   });
+
+  it("tolerates a record with missing startEpoch/endEpoch without throwing", () => {
+    // A malformed record (no startEpoch) yields a NaN gap; it must degrade to an
+    // individual run, not crash the clusterer or silently swallow the record.
+    const malformed = {
+      ...makeRun({ id: "bad" }),
+      startEpoch: undefined as unknown as number,
+      endEpoch: undefined,
+      duration: undefined,
+    };
+    const good = makeRun({ id: "good", startEpoch: 1_000 });
+    let out: ReturnType<typeof clusterChronoRuns> = [];
+    expect(() => {
+      out = clusterChronoRuns([good, malformed]);
+    }).not.toThrow();
+    // Both runs are represented; the NaN gap prevents clustering.
+    const ids = out.flatMap((e) =>
+      e.kind === "run" ? [e.run.id] : e.cluster.runs.map((r) => r.id),
+    );
+    expect(ids.sort()).toEqual(["bad", "good"]);
+    expect(out.every((e) => e.kind === "run")).toBe(true);
+  });
 });

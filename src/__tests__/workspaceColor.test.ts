@@ -16,6 +16,17 @@ describe("workspaceColor", () => {
     expect(c).toContain("text-green");
   });
 
+  it("maps distinct known workspaces to distinct, non-empty class strings", () => {
+    // Contract independent of the specific colors: known names get non-empty
+    // classes, and different names get different classes (so chips are
+    // visually distinguishable).
+    const personal = workspaceColor("personal");
+    const work = workspaceColor("work");
+    expect(personal).not.toBe("");
+    expect(work).not.toBe("");
+    expect(personal).not.toBe(work);
+  });
+
   it("is case-insensitive", () => {
     expect(workspaceColor("PERSONAL")).toBe(workspaceColor("personal"));
     expect(workspaceColor("WoRk")).toBe(workspaceColor("work"));
