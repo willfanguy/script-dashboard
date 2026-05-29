@@ -30,6 +30,9 @@ SCRIPT_RUNS_DIR="${SCRIPT_RUNS_DIR:-${HOME}/.script-runs/runs}"
 SCRIPT_DASH_URL="${SCRIPT_DASH_URL:-http://localhost:7890}"
 SCRIPT_DASH_BROWSER="${SCRIPT_DASH_BROWSER:-}"
 SCRIPT_DASH_NOTIFY="${SCRIPT_DASH_NOTIFY:-1}"
+# When "0" (default), suppress notifications for successful interactive Claude
+# sessions — too many per day to be useful. Interactive failures still notify.
+SCRIPT_DASH_NOTIFY_INTERACTIVE="${SCRIPT_DASH_NOTIFY_INTERACTIVE:-0}"
 
 # --- Internal state ---
 _SD_RUN_ID=""
@@ -85,13 +88,15 @@ _sd_cmux_hook() {
 
 _sd_notify() {
     local title="$1"
-    local message="$2"
-    local url="${3:-}"
+    local subtitle="$2"
+    local message="$3"
+    local url="${4:-}"
 
     [ "$SCRIPT_DASH_NOTIFY" = "0" ] && return 0
 
     if command -v terminal-notifier &>/dev/null; then
         local args=(-title "$title" -message "$message" -group "script-dashboard")
+        [ -n "$subtitle" ] && args+=(-subtitle "$subtitle")
         if [ -n "$url" ]; then
             if [ -n "$SCRIPT_DASH_BROWSER" ]; then
                 # Open in a specific browser app when clicked
@@ -103,8 +108,30 @@ _sd_notify() {
         fi
         terminal-notifier "${args[@]}" &>/dev/null &
     else
-        osascript -e "display notification \"$message\" with title \"$title\"" &>/dev/null &
+        # osascript fallback: subtitle goes inline with the title since the
+        # `display notification` AppleScript verb has no separate subtitle.
+        local osa_title="$title"
+        [ -n "$subtitle" ] && osa_title="$title — $subtitle"
+        osascript -e "display notification \"$message\" with title \"$osa_title\"" &>/dev/null &
     fi
+}
+
+# _sd_extract_notification_body OUTPUT
+#
+# Pull a useful one-liner from the captured output for the notification body.
+# Skips structural labels ("Topic:", "Outcome:", "Ended (...)", etc.) and
+# returns the first non-empty content line. Empty if nothing usable.
+_sd_extract_notification_body() {
+    local output="$1"
+    [ -z "$output" ] && return 0
+    printf '%s\n' "$output" | awk '
+        # Skip section labels that exist only to structure the output for the
+        # expanded card view. They are not useful as a notification body.
+        /^(Topic|Outcome):?[[:space:]]*$/ { next }
+        /^Ended[[:space:]]*\(/             { next }
+        /^[[:space:]]*$/                   { next }
+        { print; exit }
+    '
 }
 
 # --- Public API ---
@@ -303,14 +330,7 @@ report_end() {
 ENDJSON
     mv "${_SD_RUN_FILE}.tmp" "$_SD_RUN_FILE"
 
-    # Send notification
-    local icon=""
-    case "$_sd_status" in
-        success) icon="OK" ;;
-        failed)  icon="FAIL" ;;
-        killed)  icon="KILLED" ;;
-    esac
-
+    # Format duration for notification
     local duration_str
     if [ "$duration" -ge 60 ]; then
         duration_str="$((duration / 60))m $((duration % 60))s"
@@ -318,10 +338,48 @@ ENDJSON
         duration_str="${duration}s"
     fi
 
-    _sd_notify \
-        "Script Dashboard" \
-        "[$icon] $_SD_SCRIPT_NAME (${duration_str})" \
-        "${SCRIPT_DASH_URL}?run=${_SD_RUN_ID}"
+    # Suppress noisy interactive-success notifications by default. Failures
+    # always notify so they don't get lost.
+    local _sd_should_notify=1
+    if [ "$_SD_CATEGORY" = "interactive" ] \
+        && [ "$_sd_status" = "success" ] \
+        && [ "$SCRIPT_DASH_NOTIFY_INTERACTIVE" = "0" ]; then
+        _sd_should_notify=0
+    fi
+
+    if [ "$_sd_should_notify" = "1" ]; then
+        # Build status-aware title. Failures/kills get a verb so the title
+        # itself reads as the alert; successes just carry the script name.
+        local notif_title
+        case "$_sd_status" in
+            success) notif_title="$_SD_SCRIPT_NAME" ;;
+            failed)  notif_title="$_SD_SCRIPT_NAME failed" ;;
+            killed)  notif_title="$_SD_SCRIPT_NAME killed" ;;
+            *)       notif_title="$_SD_SCRIPT_NAME" ;;
+        esac
+
+        local notif_subtitle="${_SD_CATEGORY} · ${duration_str}"
+
+        # Try to extract a meaningful body line from the captured output;
+        # fall back to the previous bracketed-icon format if nothing usable.
+        local notif_body
+        notif_body=$(_sd_extract_notification_body "$output")
+        if [ -z "$notif_body" ]; then
+            local icon=""
+            case "$_sd_status" in
+                success) icon="OK" ;;
+                failed)  icon="FAIL" ;;
+                killed)  icon="KILLED" ;;
+            esac
+            notif_body="[$icon] $_SD_SCRIPT_NAME (${duration_str})"
+        fi
+
+        _sd_notify \
+            "$notif_title" \
+            "$notif_subtitle" \
+            "$notif_body" \
+            "${SCRIPT_DASH_URL}?run=${_SD_RUN_ID}"
+    fi
 
     _sd_cmux_hook stop
 

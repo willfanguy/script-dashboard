@@ -198,4 +198,83 @@ describe("sweepStaleRunning", () => {
     const entries = fs.readdirSync(runsDir);
     expect(entries.filter((e) => e.includes(".tmp."))).toEqual([]);
   });
+
+  describe("per-category thresholds", () => {
+    const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
+
+    it("uses the category override when the record has a matching category", () => {
+      // Interactive session idle 45 min — past the default 30-min threshold
+      // but well below the 8h interactive override. Should NOT be swept.
+      const startedAt = NOW_SEC - 45 * 60;
+      writeRun("idle-interactive", {
+        script: "claude-interactive",
+        category: "interactive",
+        status: "running",
+        startedAt: new Date(startedAt * 1000).toISOString(),
+        startEpoch: startedAt,
+      });
+
+      const result = sweepStaleRunning(runsDir, THRESHOLD_MS, NOW_MS, {
+        interactive: EIGHT_HOURS_MS,
+      });
+
+      expect(result.sweptIds).toEqual([]);
+      expect(readRun("idle-interactive").status).toBe("running");
+    });
+
+    it("still sweeps an interactive record past its (longer) threshold", () => {
+      // 9h idle — past the 8h override. Should be swept.
+      const startedAt = NOW_SEC - 9 * 60 * 60;
+      writeRun("ancient-interactive", {
+        script: "claude-interactive",
+        category: "interactive",
+        status: "running",
+        startedAt: new Date(startedAt * 1000).toISOString(),
+        startEpoch: startedAt,
+      });
+
+      const result = sweepStaleRunning(runsDir, THRESHOLD_MS, NOW_MS, {
+        interactive: EIGHT_HOURS_MS,
+      });
+
+      expect(result.sweptIds).toEqual(["ancient-interactive"]);
+      expect(readRun("ancient-interactive").status).toBe("killed");
+    });
+
+    it("respects the default threshold for non-matching categories", () => {
+      // Scripted (category=skill) idle 45 min — past the default 30-min
+      // threshold and unaffected by the interactive override. Should be swept.
+      const startedAt = NOW_SEC - 45 * 60;
+      writeRun("stuck-skill", {
+        script: "enrich-connections",
+        category: "skill",
+        status: "running",
+        startedAt: new Date(startedAt * 1000).toISOString(),
+        startEpoch: startedAt,
+      });
+
+      const result = sweepStaleRunning(runsDir, THRESHOLD_MS, NOW_MS, {
+        interactive: EIGHT_HOURS_MS,
+      });
+
+      expect(result.sweptIds).toEqual(["stuck-skill"]);
+      expect(readRun("stuck-skill").status).toBe("killed");
+    });
+
+    it("falls back to the default threshold when record has no category", () => {
+      const startedAt = NOW_SEC - 45 * 60;
+      writeRun("uncategorized", {
+        script: "legacy-script",
+        status: "running",
+        startedAt: new Date(startedAt * 1000).toISOString(),
+        startEpoch: startedAt,
+      });
+
+      const result = sweepStaleRunning(runsDir, THRESHOLD_MS, NOW_MS, {
+        interactive: EIGHT_HOURS_MS,
+      });
+
+      expect(result.sweptIds).toEqual(["uncategorized"]);
+    });
+  });
 });

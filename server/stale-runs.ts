@@ -6,6 +6,7 @@ import path from "path";
 interface StaleCandidate {
   id: string;
   script?: string;
+  category?: string;
   status?: string;
   startedAt?: string;
   startEpoch?: number;
@@ -34,16 +35,21 @@ function writeJsonAtomic(file: string, record: unknown): void {
 // startedAt. Runs swept get an explanatory `output` and a duration computed
 // from their last-known activity (not from now) — a run that stalled 10 min
 // after starting should show duration=10m, not duration=thresholdElapsed.
+//
+// Per-category overrides allow some categories to use a longer threshold —
+// interactive Claude sessions, in particular, are alive across long idle
+// periods (meetings, lunch, reading code) and shouldn't be killed by the
+// same 30-min cadence that catches a genuinely hung scripted job.
 export function sweepStaleRunning(
   runsDir: string,
   thresholdMs: number,
   nowMs: number = Date.now(),
+  categoryThresholdsMs: Record<string, number> = {},
 ): SweepResult {
   if (!fs.existsSync(runsDir)) return { sweptIds: [], scanned: 0 };
 
   const files = fs.readdirSync(runsDir).filter((f) => f.endsWith(".json"));
   const sweptIds: string[] = [];
-  const thresholdSec = Math.floor(thresholdMs / 1000);
   const nowSec = Math.floor(nowMs / 1000);
 
   for (const file of files) {
@@ -64,6 +70,12 @@ export function sweepStaleRunning(
         : parseIsoEpoch(record.startedAt);
     const lastActivityEpoch = progressEpoch ?? startEpoch;
     if (lastActivityEpoch == null) continue;
+
+    const categoryOverride = record.category
+      ? categoryThresholdsMs[record.category]
+      : undefined;
+    const effectiveThresholdMs = categoryOverride ?? thresholdMs;
+    const thresholdSec = Math.floor(effectiveThresholdMs / 1000);
 
     const idleSec = nowSec - lastActivityEpoch;
     if (idleSec < thresholdSec) continue;

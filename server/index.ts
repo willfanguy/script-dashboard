@@ -879,9 +879,23 @@ if (fs.existsSync(distDir)) {
   });
 }
 
+// Per-category sweep thresholds. Interactive Claude sessions are alive across
+// long idle periods (meetings, reading, lunch) and shouldn't be killed by the
+// 30-min cadence that catches genuinely hung scripted jobs. 8h covers a
+// workday of intermittent typing; orphans still get cleaned up within one
+// calendar day if Claude Code crashes without SessionEnd.
+const STALE_CATEGORY_OVERRIDES_MS: Record<string, number> = {
+  interactive: 8 * 60 * 60 * 1000,
+};
+
 function runStaleSweep(): void {
   const thresholdMs = STALE_RUN_THRESHOLD_MINUTES * 60 * 1000;
-  const { sweptIds } = sweepStaleRunning(RUNS_DIR, thresholdMs);
+  const { sweptIds } = sweepStaleRunning(
+    RUNS_DIR,
+    thresholdMs,
+    Date.now(),
+    STALE_CATEGORY_OVERRIDES_MS,
+  );
   if (sweptIds.length > 0) {
     console.log(
       `[stale-sweep] marked ${sweptIds.length} run(s) killed:`,

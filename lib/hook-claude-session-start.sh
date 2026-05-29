@@ -26,6 +26,7 @@ input=$(cat 2>/dev/null || echo '{}')
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
 cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
 source_kind=$(printf '%s' "$input" | jq -r '.source // empty' 2>/dev/null)
+transcript_path=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
 
 # Without a session_id we have no way to correlate with SessionEnd / Stop. Bail.
 if [ -z "$session_id" ]; then
@@ -43,9 +44,15 @@ if [ -f "$state_dir/${session_id}.runid" ]; then
 fi
 
 # Description: cwd plus the source kind when it adds signal (resume, etc.).
+# Plain-English label for readability; "startup" is suppressed because it's
+# the default and adds no signal.
 desc="${cwd:-unknown cwd}"
 if [ -n "$source_kind" ] && [ "$source_kind" != "startup" ]; then
-    desc="$desc (source: $source_kind)"
+    case "$source_kind" in
+        resume) desc="$desc (resumed)" ;;
+        clear)  desc="$desc (cleared)" ;;
+        *)      desc="$desc ($source_kind)" ;;
+    esac
 fi
 
 # Append cmux workspace context if claude was invoked inside a cmux pane.
@@ -86,6 +93,11 @@ run_id=$(bash "$script_dir/report-skill-start.sh" \
     --category interactive 2>/dev/null) || exit 0
 
 # Persist the bridge so SessionEnd / Stop can find this run by session_id.
+# JSON format: { runid, transcript_path }. SessionEnd handles both this and the
+# legacy plain-text format (just the runid) for in-flight sessions during the
+# transition window.
 if [ -n "$run_id" ]; then
-    printf '%s' "$run_id" > "$state_dir/${session_id}.runid"
+    jq -cn --arg rid "$run_id" --arg tp "$transcript_path" \
+        '{runid: $rid, transcript_path: $tp}' \
+        > "$state_dir/${session_id}.runid"
 fi
