@@ -339,6 +339,18 @@ report_artifact() {
     fi
 }
 
+# report_artifacts TYPE LABEL PATH [TYPE LABEL PATH ...]
+#
+# Declare several artifacts from a flat list of (TYPE, LABEL, PATH) triples —
+# the shape report-skill-end.sh and report-skill.sh accumulate from repeated
+# --artifact flags. A trailing partial triple is ignored.
+report_artifacts() {
+    while [ $# -ge 3 ]; do
+        report_artifact "$1" "$2" "$3"
+        shift 3
+    done
+}
+
 # report_review_required
 #
 # Flag the run as needing human review in the dashboard. Combine with

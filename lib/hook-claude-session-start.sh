@@ -20,10 +20,15 @@
 
 set -uo pipefail
 
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=/dev/null
+source "$script_dir/hook-claude-common.sh"
+sd_hook_have_jq || exit 0
+
 # Read Claude's JSON payload. Default to {} so missing stdin doesn't break parsing.
 input=$(cat 2>/dev/null || echo '{}')
 
-session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
+session_id=$(sd_hook_session_id "$input")
 cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
 source_kind=$(printf '%s' "$input" | jq -r '.source // empty' 2>/dev/null)
 transcript_path=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
@@ -33,13 +38,12 @@ if [ -z "$session_id" ]; then
     exit 0
 fi
 
-# Bridge directory: maps Claude session_id → dashboard RUN_ID.
-runs_root="${SCRIPT_RUNS_DIR:-$HOME/.script-runs/runs}"
-state_dir="$(dirname "$runs_root")/.claude-sessions"
-mkdir -p "$state_dir"
+# Bridge file: maps Claude session_id → dashboard RUN_ID.
+runid_file="$(sd_hook_runid_file "$session_id")"
+mkdir -p "$(dirname "$runid_file")"
 
 # Idempotent: don't double-open if SessionStart fires twice for the same session.
-if [ -f "$state_dir/${session_id}.runid" ]; then
+if [ -f "$runid_file" ]; then
     exit 0
 fi
 
@@ -86,18 +90,16 @@ fi
 
 # Open the dashboard record via the same script skills use. --category puts
 # this run under "interactive" instead of the default "skill" lane.
-script_dir="$(cd "$(dirname "$0")" && pwd)"
 run_id=$(bash "$script_dir/report-skill-start.sh" \
     "claude-interactive" \
     "$desc" \
     --category interactive 2>/dev/null) || exit 0
 
 # Persist the bridge so SessionEnd / Stop can find this run by session_id.
-# JSON format: { runid, transcript_path }. SessionEnd handles both this and the
-# legacy plain-text format (just the runid) for in-flight sessions during the
-# transition window.
+# JSON format: { runid, transcript_path }. The hooks also accept the legacy
+# plain-text format (just the runid) for sessions in flight across the change.
 if [ -n "$run_id" ]; then
     jq -cn --arg rid "$run_id" --arg tp "$transcript_path" \
         '{runid: $rid, transcript_path: $tp}' \
-        > "$state_dir/${session_id}.runid"
+        > "$runid_file"
 fi

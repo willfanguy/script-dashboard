@@ -23,34 +23,27 @@
 
 set -uo pipefail
 
-input=$(cat 2>/dev/null || echo '{}')
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=/dev/null
+source "$script_dir/hook-claude-common.sh"
+sd_hook_have_jq || exit 0
 
-session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
+input=$(cat 2>/dev/null || echo '{}')
+session_id=$(sd_hook_session_id "$input")
 [ -z "$session_id" ] && exit 0
 
-runs_root="${SCRIPT_RUNS_DIR:-$HOME/.script-runs/runs}"
-state_dir="$(dirname "$runs_root")/.claude-sessions"
-runid_file="$state_dir/${session_id}.runid"
-
+runid_file="$(sd_hook_runid_file "$session_id")"
 # No matching SessionStart record means this session was tracked elsewhere
 # (or SessionStart didn't fire for it). Silent no-op.
 [ ! -f "$runid_file" ] && exit 0
 
-# Bridge format may be JSON ({runid, transcript_path}) or plain text (legacy:
-# just the run id). Try JSON first; fall back to treating the contents as raw
-# text. Either way we exit cleanly if we can't extract a run id.
-bridge=$(cat "$runid_file" 2>/dev/null)
-run_id=$(printf '%s' "$bridge" | jq -r '.runid // empty' 2>/dev/null)
-transcript_path=$(printf '%s' "$bridge" | jq -r '.transcript_path // empty' 2>/dev/null)
-if [ -z "$run_id" ]; then
-    # Legacy plain-text bridge.
-    run_id="$bridge"
-    transcript_path=""
-fi
-if [ -z "$run_id" ]; then
+# Sets SD_RUN_ID / SD_TRANSCRIPT_PATH (JSON or legacy plain-text bridge).
+if ! sd_hook_read_bridge "$runid_file"; then
     rm -f "$runid_file"
     exit 0
 fi
+run_id="$SD_RUN_ID"
+transcript_path="$SD_TRANSCRIPT_PATH"
 
 # Reason for end. Claude may include "reason" in the payload (clear, logout,
 # exit, etc.). Default to a generic "ended" when missing.
@@ -70,12 +63,8 @@ tools_bash=0
 tools_edit=0
 tools_subagent=0
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
-    topic=$(jq -rs '
-        (map(select(.type == "last-prompt")) | .[0]?.lastPrompt) // ""
-    ' "$transcript_path" 2>/dev/null || printf '')
-    custom_title=$(jq -rs '
-        (map(select(.type == "custom-title")) | .[-1]?.customTitle) // ""
-    ' "$transcript_path" 2>/dev/null || printf '')
+    topic="$(sd_hook_extract_topic "$transcript_path")"
+    custom_title="$(sd_hook_extract_custom_title "$transcript_path")"
     outcome=$(jq -rs '
         ((map(select(.type == "assistant")) | .[-1]?.message.content) // [])
         | map(select(.type == "text") | .text)
@@ -119,14 +108,13 @@ else
     summary="Session $reason"
 fi
 
-script_dir="$(cd "$(dirname "$0")" && pwd)"
 bash "$script_dir/report-skill-end.sh" "$run_id" "$summary" 2>/dev/null || true
 
 # Patch the finalized run record with structured enrichment fields. Topic and
 # outcome cap at 500 chars (header rendering); tool counts and branch are tiny.
 # Best-effort: any failure leaves the record valid (just un-enriched).
 if [ -n "$topic" ] || [ -n "$outcome" ] || [ -n "$custom_title" ] || [ -n "$git_branch" ] || [ "${tools_total:-0}" -gt 0 ] 2>/dev/null; then
-    run_file="$runs_root/${run_id}.json"
+    run_file="$(sd_hook_runs_root)/${run_id}.json"
     if [ -f "$run_file" ]; then
         python3 - "$run_file" "$topic" "$outcome" "$custom_title" "$git_branch" \
             "$tools_total" "$tools_bash" "$tools_edit" "$tools_subagent" \

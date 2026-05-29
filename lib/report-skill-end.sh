@@ -137,11 +137,11 @@ if [ "$REVIEW_REQUIRED" = "true" ]; then
     report_review_required
 fi
 
-i=0
-while [ $i -lt ${#ARTIFACT_ARGS[@]} ]; do
-    report_artifact "${ARTIFACT_ARGS[$i]}" "${ARTIFACT_ARGS[$((i + 1))]}" "${ARTIFACT_ARGS[$((i + 2))]}"
-    i=$((i + 3))
-done
+# Guard the expansion: under `set -u`, "${arr[@]}" on an empty array errors in
+# bash 3.2 (macOS system bash).
+if [ ${#ARTIFACT_ARGS[@]} -gt 0 ]; then
+    report_artifacts "${ARTIFACT_ARGS[@]}"
+fi
 
 report_end "$EXIT_CODE"
 

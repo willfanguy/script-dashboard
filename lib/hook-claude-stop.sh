@@ -23,30 +23,23 @@
 
 set -uo pipefail
 
-input=$(cat 2>/dev/null || echo '{}')
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=/dev/null
+source "$script_dir/hook-claude-common.sh"
+sd_hook_have_jq || exit 0
 
-session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
+input=$(cat 2>/dev/null || echo '{}')
+session_id=$(sd_hook_session_id "$input")
 [ -z "$session_id" ] && exit 0
 
-runs_root="${SCRIPT_RUNS_DIR:-$HOME/.script-runs/runs}"
-state_dir="$(dirname "$runs_root")/.claude-sessions"
-runid_file="$state_dir/${session_id}.runid"
-
+runid_file="$(sd_hook_runid_file "$session_id")"
 [ ! -f "$runid_file" ] && exit 0
 
-# Bridge format may be JSON ({runid, transcript_path}) or plain text (legacy:
-# just the run id). Mirror SessionEnd's parsing so the SessionStart hook's
-# JSON format doesn't silently break heartbeats.
-bridge=$(cat "$runid_file" 2>/dev/null)
-run_id=$(printf '%s' "$bridge" | jq -r '.runid // empty' 2>/dev/null)
-transcript_path=$(printf '%s' "$bridge" | jq -r '.transcript_path // empty' 2>/dev/null)
-if [ -z "$run_id" ]; then
-    run_id="$bridge"
-    transcript_path=""
-fi
-[ -z "$run_id" ] && exit 0
+sd_hook_read_bridge "$runid_file" || exit 0
+run_id="$SD_RUN_ID"
+transcript_path="$SD_TRANSCRIPT_PATH"
 
-run_file="$runs_root/${run_id}.json"
+run_file="$(sd_hook_runs_root)/${run_id}.json"
 [ ! -f "$run_file" ] && exit 0
 
 # Only beat the heart on records still in "running" status. Finalized records
@@ -57,32 +50,19 @@ status=$(jq -r '.status // empty' "$run_file" 2>/dev/null)
 
 ts=$(date "+%Y-%m-%dT%H:%M:%S%z")
 
-# Opportunistic topic extraction: if the record doesn't yet have a topic
-# (set later by SessionEnd) and the transcript is readable, pull the first
-# user prompt now so the row shows what the session is about while it's
-# still running. Best-effort — heartbeat update proceeds regardless.
-needs_topic="false"
-existing_topic=$(jq -r '.topic // empty' "$run_file" 2>/dev/null)
-if [ -z "$existing_topic" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
-    needs_topic="true"
-fi
-
+# Opportunistic topic extraction: only pull the first user prompt if the
+# record doesn't yet have a topic (SessionEnd sets it authoritatively later),
+# so a running row shows what it's about. Best-effort — the heartbeat update
+# below proceeds regardless.
 topic=""
-if [ "$needs_topic" = "true" ]; then
-    topic=$(jq -rs '
-        (map(select(.type == "last-prompt")) | .[0]?.lastPrompt) // ""
-    ' "$transcript_path" 2>/dev/null || printf '')
+existing_topic=$(jq -r '.topic // empty' "$run_file" 2>/dev/null)
+if [ -z "$existing_topic" ]; then
+    topic="$(sd_hook_extract_topic "$transcript_path")"
 fi
 
-# Always re-pull the latest custom-title — Claude Code refines the title as
-# the conversation grows (auto-renames many times per session), so we want
-# the freshest value on every heartbeat, not just once.
-custom_title=""
-if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
-    custom_title=$(jq -rs '
-        (map(select(.type == "custom-title")) | .[-1]?.customTitle) // ""
-    ' "$transcript_path" 2>/dev/null || printf '')
-fi
+# Always re-pull the latest custom title — Claude Code refines it as the
+# conversation grows, so we want the freshest value on every heartbeat.
+custom_title="$(sd_hook_extract_custom_title "$transcript_path")"
 
 tmp="${run_file}.tmp.$$"
 # Build the jq patch dynamically: always update lastProgressAt; set topic on
