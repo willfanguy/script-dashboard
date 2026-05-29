@@ -231,6 +231,31 @@ describe("suppression filtering on GET", () => {
   });
 });
 
+describe("unified review rollup (read projection)", () => {
+  it("projects reviewedAt when the only artifact was suppressed elsewhere", async () => {
+    fs.writeFileSync(
+      suppressedFile,
+      JSON.stringify({
+        "/vault/gone.md": { reason: "archived", suppressedAt: "x" },
+      }),
+    );
+    writeRun({
+      id: "allsupp-1",
+      reviewRequired: true,
+      artifacts: [{ type: "task-note", label: "Gone", path: "/vault/gone.md" }],
+    });
+    const res = await request(app).get("/api/runs/allsupp-1").expect(200);
+    expect(res.body.artifacts).toEqual([]); // suppressed away
+    expect(res.body.reviewedAt).toBeTruthy(); // ...but the run clears the queue
+  });
+
+  it("does NOT auto-review a run that never emitted artifacts", async () => {
+    writeRun({ id: "noart-1", reviewRequired: true });
+    const res = await request(app).get("/api/runs/noart-1").expect(200);
+    expect(res.body.reviewedAt).toBeUndefined();
+  });
+});
+
 describe("JIRA endpoints without configuration", () => {
   it("503s when JIRA is not configured", async () => {
     await request(app).get("/api/jira/ABC-1/transitions").expect(503);

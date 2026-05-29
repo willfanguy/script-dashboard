@@ -181,38 +181,54 @@ export function createApp(config: AppConfig): DashboardApp {
     atomicWriteJson(config.suppressedFile, reg);
   }
 
-  // Apply the suppression filter to a run record's artifacts in place. Returns
-  // the number of artifacts dropped so callers can log/expose if desired.
+  // Single source of truth for "is this run fully reviewed?", shared by the
+  // read projection (applySuppressionFilter) and the write path
+  // (POST /artifacts/reviewed), which previously carried two subtly different
+  // copies of the rule (one gated on reviewRequired and ran .every() on the
+  // post-filter list; the other required visible.length > 0).
   //
-  // Filter rule: drop artifacts whose path is in the registry AND which lack a
-  // reviewedAt timestamp on this run record. This keeps the SOURCE run's
-  // reviewed stub visible (so the user can undo) while suppressing the same
-  // path's reappearance on every NEW run that emits it. Archived artifacts
-  // always have no reviewedAt, so they're stripped cleanly on next refresh.
+  // A run is fully reviewed when it emitted at least one artifact and every
+  // artifact still visible to the user — not suppressed on another run unless
+  // reviewed here — carries a reviewedAt. An empty visible set (all artifacts
+  // archived/reviewed elsewhere) counts as fully reviewed: nothing's left to
+  // act on. A run that never emitted artifacts is never auto-reviewed.
+  function isRunFullyReviewed(
+    record: RunRecord,
+    registry: SuppressionRegistry,
+  ): boolean {
+    if (record.reviewedAt) return false;
+    const artifacts = record.artifacts ?? [];
+    if (artifacts.length === 0) return false;
+    const visible = artifacts.filter(
+      (a) => !(a.path in registry) || !!a.reviewedAt,
+    );
+    return visible.every((a) => !!a.reviewedAt);
+  }
+
+  // Drop suppressed-unreviewed artifacts from a record in place (read-time
+  // projection — the on-disk record is untouched). Returns the count dropped.
   //
-  // Also virtually clears reviewedAt on the RUN record when every surviving
-  // (post-filter) artifact is reviewed. Without this, a run whose unreviewed
-  // artifacts all got suppression-filtered (because they were reviewed or
-  // archived on a different run) would stay in the Needs Review queue forever
-  // — the on-disk rollup in POST /artifacts/reviewed operates on the unfiltered
-  // list and never fires. This projection is read-time only; the persisted
-  // record is unchanged.
+  // Dropped = path in registry AND no reviewedAt on this run record. This keeps
+  // the SOURCE run's reviewed stub visible (so the user can undo) while
+  // suppressing the same path's reappearance on every NEW run that emits it.
+  // Archived artifacts always lack reviewedAt, so they're stripped cleanly.
+  //
+  // Also projects reviewedAt when the run is fully reviewed, so a run whose
+  // unreviewed artifacts were all suppressed-elsewhere still clears the Needs
+  // Review queue. Decided from the ORIGINAL list (before the in-place filter)
+  // so "had artifacts, all suppressed" stays distinct from "never had any".
   function applySuppressionFilter(
     record: RunRecord,
     registry: SuppressionRegistry,
   ): number {
     if (!record.artifacts || record.artifacts.length === 0) return 0;
     const before = record.artifacts.length;
+    if (isRunFullyReviewed(record, registry)) {
+      record.reviewedAt = new Date().toISOString();
+    }
     record.artifacts = record.artifacts.filter(
       (a) => !(a.path in registry) || !!a.reviewedAt,
     );
-    if (
-      record.reviewRequired &&
-      !record.reviewedAt &&
-      record.artifacts.every((a) => !!a.reviewedAt)
-    ) {
-      record.reviewedAt = new Date().toISOString();
-    }
     return before - record.artifacts.length;
   }
 
@@ -279,7 +295,13 @@ export function createApp(config: AppConfig): DashboardApp {
   function broadcastUpdate(): void {
     const data = JSON.stringify({ type: "update", timestamp: Date.now() });
     for (const client of sseClients) {
-      client.write(`data: ${data}\n\n`);
+      try {
+        client.write(`data: ${data}\n\n`);
+      } catch {
+        // Socket already gone but `close` hasn't fired yet — drop it so a dead
+        // client can't throw out of an otherwise-completed request handler.
+        sseClients.delete(client);
+      }
     }
   }
 
@@ -553,19 +575,10 @@ export function createApp(config: AppConfig): DashboardApp {
     }
     target.reviewedAt = new Date().toISOString();
 
-    // Rollup uses the SAME visible-to-user view that applySuppressionFilter
-    // computes at read time. Artifacts whose paths are already in the
-    // suppression registry (archived or reviewed-via-another-run) don't appear
-    // in the dashboard, so they must not block the run from clearing.
-    const suppressed = readSuppressed();
-    const visible = artifacts.filter(
-      (a) => !(a.path in suppressed) || !!a.reviewedAt,
-    );
-    if (
-      visible.length > 0 &&
-      visible.every((a) => !!a.reviewedAt) &&
-      !record.reviewedAt
-    ) {
+    // Roll the run up to reviewed when every still-visible artifact is — the
+    // shared rule the read projection uses too. Suppressed-elsewhere artifacts
+    // (archived / reviewed on another run) aren't shown, so they don't block.
+    if (isRunFullyReviewed(record, readSuppressed())) {
       record.reviewedAt = target.reviewedAt;
     }
 
