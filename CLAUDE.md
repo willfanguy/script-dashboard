@@ -308,12 +308,15 @@ Reviewed and archived artifacts are tracked in `~/.script-runs/.suppressed.json`
     "reason": "reviewed" | "archived",
     "suppressedAt": "ISO_TIMESTAMP",
     "viaScript": "todo-sync",
-    "viaRunId": "todo-sync-2026-05-12T21-48-31Z-16303"
+    "viaRunId": "todo-sync-2026-05-12T21-48-31Z-16303",
+    "fingerprint": "status-divergence|In Progress|blocked"
   }
 }
 ```
 
 (`viaScript` / `viaRunId` are omitted for archive entries, since the archive endpoint doesn't know which run/script the artifact came from.)
+
+**`fingerprint`** (reviewed entries only) captures the decision's state at review time: `` `${kind}|${jiraStatus ?? ""}|${localStatus ?? ""}` `` (see `decisionFingerprint` in `server/suppression.ts`). A reviewed item stays muted only while a re-emitted artifact's current fingerprint still matches. When JIRA/local state drifts, the fingerprint changes and the item re-surfaces — see the filter rule below. Decision-less artifacts fingerprint to `""` (they still dedupe against each other). Archived entries carry no fingerprint and suppress by path. **Legacy entries written before fingerprinting also lack one; a `reviewed` entry with no fingerprint is treated as inert (re-surfaces once, then is re-reviewed with a fingerprint) — the one-time cost of the migration, deliberately erring toward showing not hiding.**
 
 **Write path:**
 
@@ -324,16 +327,29 @@ Reviewed and archived artifacts are tracked in `~/.script-runs/.suppressed.json`
 **Filter rule (server-side, applied in `GET /api/runs` and `GET /api/runs/:id`):**
 
 ```
-drop artifact iff (path in registry) AND (artifact has no reviewedAt on this run record)
+drop artifact iff isSuppressed(artifact) AND (artifact has no reviewedAt on this run record)
+
+isSuppressed(artifact):
+  entry = registry[artifact.path]
+  if no entry:              false
+  if entry.reason archived: true                         # by path — archive has no undo
+  if entry.fingerprint absent: false                     # legacy reviewed entry → inert
+  else: entry.fingerprint === decisionFingerprint(artifact.decision)
 ```
 
-The asymmetry matters. The path appears in the registry only after the user marked it reviewed somewhere. That "somewhere" is a specific run record where the artifact's `reviewedAt` was also written. On that source run, the filter sees `reviewedAt` set and KEEPS the artifact visible — so the collapsed "Reviewed Xm ago" stub stays reachable and the user can undo. On any OTHER run record that emits the same path (a fresh agent run), the path-in-registry condition fires AND the artifact lacks `reviewedAt`, so it gets stripped from the response. Archived items always lack `reviewedAt` on every run, so they're filtered universally — that's intended (archive has no undo).
+The asymmetry matters. The path appears in the registry only after the user marked it reviewed somewhere. That "somewhere" is a specific run record where the artifact's `reviewedAt` was also written. On that source run, the filter sees `reviewedAt` set and KEEPS the artifact visible — so the collapsed "Reviewed Xm ago" stub stays reachable and the user can undo. On any OTHER run record that emits the same path **in the same state** (a fresh agent run), `isSuppressed` fires AND the artifact lacks `reviewedAt`, so it gets stripped from the response. If the state has drifted since review, the fingerprint no longer matches and the item re-surfaces. Archived items always lack `reviewedAt` on every run and suppress by path, so they're filtered universally — that's intended (archive has no undo).
 
-**Cross-script semantics:** The registry is keyed purely by path. If you reviewed an item via todo-sync, a different agent (slack-saved-sync, meeting-tasks-extractor) that later emits the same path will also have it filtered. This is intentional — same file → same suppression. If you find a case where you want one agent's surface to ignore another agent's suppression, revisit the schema (likely needs `(viaScript, path)` keying).
+**Cross-script semantics:** The registry is keyed by path (reviewed entries additionally gated by fingerprint). If you reviewed an item via todo-sync, a different agent (slack-saved-sync, meeting-tasks-extractor) that later emits the same path in the same state will also have it filtered. This is intentional — same file + same state → same suppression. If you find a case where you want one agent's surface to ignore another agent's suppression, revisit the schema (likely needs `(viaScript, path)` keying).
 
 ### Known trade-offs (revisit if any of these actually bite)
 
-1. **No state-change re-surfacing.** A `status-divergence` reviewed today stays muted even if JIRA later moves to a new state. The follow-up path is a "state-snapshot" flavor: store the `(jiraStatus, localStatus)` tuple at review time and re-surface only when either value changes. About 3 hours of work, would replace the `SuppressionEntry` schema with a versioned form. Skipped because indefinite-mute solves the immediate pain.
+1. **State-change re-surfacing — IMPLEMENTED (2026-06-03, "Phase 1").** Reviewed entries are now fingerprinted on `(kind, jiraStatus, localStatus)`; a reviewed item re-surfaces when its state drifts. Replaced the indefinite-mute behavior that hid SM-817 (reviewed at JIRA `In Progress`, stayed muted after JIRA moved to `Blocked`). See the `fingerprint` field and `decisionFingerprint` / `isSuppressed` in `server/suppression.ts`; regression tests in `server/__tests__/api.test.ts` under "fingerprint-aware suppression."
+
+   **Phase 2 — NOT yet done (revisit if the noise becomes an annoyance).** Two decision kinds emit no state metadata, so they can't be fingerprinted and fall to "never suppress = always surface" — safe (never hidden) but repetitive every run:
+   - `priority-mismatch` (e.g. SM-685: local `3-medium` vs JIRA `Major`) — emitted today with **no `decision` block** (default edit/archive UI).
+   - `archived-but-JIRA-open` (e.g. SM-817) — same, no `decision` block.
+
+   Fix when it bites: in `todo-sync-processor`, emit a `decision` for these two cases carrying the state axis that defines them (priority pair for the former; jiraStatus + archive flag for the latter), and extend `decisionFingerprint` to include `priority` when present. That gives them precise dedup instead of always-on. Until then they re-appear each run — which is the *safe* failure direction, just chatty. Trigger to revisit: Will notices SM-685/SM-817-style items nagging on every sync.
 2. **No inspection UI.** The registry is invisible by design — most of the time it should be. Inspect via `cat ~/.script-runs/.suppressed.json | jq` if needed. Build a panel if it becomes useful.
 3. **Cross-script suppression is global.** Documented above. If this becomes wrong, switch to `(viaScript, path)` keying.
 4. **No auto-expiry.** Entries live forever unless un-marked. A path that disappears from the filesystem (e.g., user manually deletes a Task Note) leaves a stale registry entry. Harmless — the entry just doesn't match anything. A periodic cleanup pass could drop entries whose path no longer exists; not built.

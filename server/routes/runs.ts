@@ -15,6 +15,7 @@ import {
   removeSuppression,
   applySuppressionFilter,
   isRunFullyReviewed,
+  decisionFingerprint,
 } from "../suppression.js";
 import { sweepStaleRunning } from "../stale-runs.js";
 
@@ -248,6 +249,9 @@ export function registerRunRoutes(app: Express, ctx: RouteContext): void {
         suppressedAt: target.reviewedAt,
         viaScript: record.script,
         viaRunId: record.id,
+        // Pin the decision's state at review time so the item re-surfaces if
+        // JIRA/local state later drifts (see decisionFingerprint).
+        fingerprint: decisionFingerprint(target.decision),
       });
       res.json({ artifact: target, run: record });
     } catch (err) {

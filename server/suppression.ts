@@ -1,16 +1,57 @@
 import fs from "fs";
 import { atomicWriteJson } from "./fs-utils.js";
-import type { RunRecord } from "./types.js";
+import type { Artifact, ArtifactDecision, RunRecord } from "./types.js";
 
 // Suppression registry — paths in this file are filtered out of every GET so
 // reviewed / archived items don't keep reappearing in the review queue on each
-// agent rerun. Indefinite mute keyed by absolute artifact path.
+// agent rerun. Keyed by absolute artifact path.
+//
+// "reviewed" entries are fingerprinted: the entry records the decision state at
+// review time, and a re-emitted artifact is suppressed only while its current
+// fingerprint still matches. When JIRA/local state drifts, the fingerprint
+// changes and the item re-surfaces — fixing the old indefinite-mute behavior
+// where a reviewed divergence stayed hidden even after its state changed.
+// "archived" entries stay path-keyed (archive is a deliberate, undo-less
+// throw-away, and todo-sync's archive rescan must stay deduped).
 
 export interface SuppressionEntry {
   reason: "reviewed" | "archived";
   suppressedAt: string;
   viaScript?: string;
   viaRunId?: string;
+  // Decision state captured at review time (see decisionFingerprint). Absent on
+  // archived entries and on legacy entries written before fingerprinting; an
+  // absent fingerprint on a "reviewed" entry is treated as inert (re-surfaces).
+  fingerprint?: string;
+}
+
+// Canonical state fingerprint for a decision. Two artifacts with the same
+// fingerprint represent the same decision in the same state; a change to the
+// JIRA or local status (the axes that define a divergence) yields a new
+// fingerprint, which is what lets a reviewed item re-surface when state drifts.
+// No decision → "", so decision-less artifacts still dedupe precisely against
+// each other (empty === empty); only legacy registry entries are inert.
+export function decisionFingerprint(decision?: ArtifactDecision): string {
+  if (!decision) return "";
+  return `${decision.kind}|${decision.jiraStatus ?? ""}|${decision.localStatus ?? ""}`;
+}
+
+// Whether a registry entry currently suppresses this artifact.
+//  - "archived": always (by path) — archiving has no undo and the archive
+//    rescan must stay deduped.
+//  - "reviewed": only while the reviewed-time fingerprint matches the artifact's
+//    current state. A legacy "reviewed" entry with no stored fingerprint is
+//    inert (never matches), so it re-surfaces once and is re-reviewed with a
+//    fingerprint. Errs toward showing, never hiding.
+export function isSuppressed(
+  artifact: Artifact,
+  registry: SuppressionRegistry,
+): boolean {
+  const entry = registry[artifact.path];
+  if (!entry) return false;
+  if (entry.reason === "archived") return true;
+  if (entry.fingerprint === undefined) return false;
+  return entry.fingerprint === decisionFingerprint(artifact.decision);
 }
 
 export type SuppressionRegistry = Record<string, SuppressionEntry>;
@@ -59,7 +100,7 @@ export function isRunFullyReviewed(
   const artifacts = record.artifacts ?? [];
   if (artifacts.length === 0) return false;
   const visible = artifacts.filter(
-    (a) => !(a.path in registry) || !!a.reviewedAt,
+    (a) => !isSuppressed(a, registry) || !!a.reviewedAt,
   );
   return visible.every((a) => !!a.reviewedAt);
 }
@@ -81,10 +122,11 @@ function projectedReviewedAt(record: RunRecord): string {
 // Drop suppressed-unreviewed artifacts from a record in place (read-time
 // projection — the on-disk record is untouched). Returns the count dropped.
 //
-// Dropped = path in registry AND no reviewedAt on this run record. This keeps
-// the SOURCE run's reviewed stub visible (so the user can undo) while
-// suppressing the same path's reappearance on every NEW run that emits it.
-// Archived artifacts always lack reviewedAt, so they're stripped cleanly.
+// Dropped = isSuppressed(artifact) (see above) AND no reviewedAt on this run
+// record. This keeps the SOURCE run's reviewed stub visible (so the user can
+// undo) while suppressing the same path's reappearance on every NEW run that
+// emits it in the same state. Archived artifacts always lack reviewedAt, so
+// they're stripped cleanly.
 //
 // Also projects reviewedAt when the run is fully reviewed, so a run whose
 // unreviewed artifacts were all suppressed-elsewhere still clears the Needs
@@ -100,7 +142,7 @@ export function applySuppressionFilter(
     record.reviewedAt = projectedReviewedAt(record);
   }
   record.artifacts = record.artifacts.filter(
-    (a) => !(a.path in registry) || !!a.reviewedAt,
+    (a) => !isSuppressed(a, registry) || !!a.reviewedAt,
   );
   return before - record.artifacts.length;
 }

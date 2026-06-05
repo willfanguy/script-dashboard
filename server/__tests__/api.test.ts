@@ -213,14 +213,20 @@ describe("review state", () => {
 
 describe("suppression filtering on GET", () => {
   it("drops a suppressed-unreviewed artifact from a DIFFERENT run", async () => {
-    // Run-1 emitted note.md and it was reviewed there (suppressed).
+    // Run-1 emitted note.md and it was reviewed there (suppressed). The entry
+    // carries the fingerprint of a decision-less artifact ("").
     fs.writeFileSync(
       suppressedFile,
       JSON.stringify({
-        "/vault/shared.md": { reason: "reviewed", suppressedAt: "x" },
+        "/vault/shared.md": {
+          reason: "reviewed",
+          suppressedAt: "x",
+          fingerprint: "",
+        },
       }),
     );
-    // Run-2 re-emits the same path without a reviewedAt → should be filtered.
+    // Run-2 re-emits the same path (same "" fingerprint) without a reviewedAt →
+    // should be filtered.
     writeRun({
       id: "run2-1",
       reviewRequired: true,
@@ -273,6 +279,149 @@ describe("unified review rollup (read projection)", () => {
     expect(first.body.reviewedAt).toBeTruthy();
     // The bug this guards: projecting Date.now() reset the timestamp per read.
     expect(second.body.reviewedAt).toBe(first.body.reviewedAt);
+  });
+});
+
+describe("fingerprint-aware suppression (state-change re-surfacing)", () => {
+  // Regression for the SM-817 class: an item reviewed at one JIRA state stayed
+  // muted forever even after JIRA moved to a new, materially different state.
+  it("re-surfaces a reviewed divergence when the JIRA state later changes", async () => {
+    fs.writeFileSync(
+      suppressedFile,
+      JSON.stringify({
+        "/vault/SM-817.md": {
+          reason: "reviewed",
+          suppressedAt: "x",
+          fingerprint: "status-divergence|In Progress|blocked",
+        },
+      }),
+    );
+    // A later run re-emits the same path, but JIRA has moved to Done.
+    writeRun({
+      id: "fp-1",
+      reviewRequired: true,
+      artifacts: [
+        {
+          type: "task-note",
+          label: "SM-817",
+          path: "/vault/SM-817.md",
+          decision: {
+            kind: "status-divergence",
+            jiraKey: "SM-817",
+            jiraStatus: "Done",
+            localStatus: "blocked",
+          },
+        },
+      ],
+    });
+    const res = await request(app).get("/api/runs/fp-1").expect(200);
+    expect(res.body.artifacts).toHaveLength(1); // state changed → NOT suppressed
+    expect(res.body.reviewedAt).toBeUndefined(); // run is back in the queue
+  });
+
+  it("keeps suppressing when the reviewed state is unchanged", async () => {
+    fs.writeFileSync(
+      suppressedFile,
+      JSON.stringify({
+        "/vault/SM-609.md": {
+          reason: "reviewed",
+          suppressedAt: "x",
+          fingerprint: "status-divergence|In Progress|blocked",
+        },
+      }),
+    );
+    writeRun({
+      id: "fp-2",
+      reviewRequired: true,
+      artifacts: [
+        {
+          type: "task-note",
+          label: "SM-609",
+          path: "/vault/SM-609.md",
+          decision: {
+            kind: "status-divergence",
+            jiraKey: "SM-609",
+            jiraStatus: "In Progress",
+            localStatus: "blocked",
+          },
+        },
+      ],
+    });
+    const res = await request(app).get("/api/runs/fp-2").expect(200);
+    expect(res.body.artifacts).toEqual([]); // identical state → still muted
+  });
+
+  it("treats legacy entries (no fingerprint) as inert so they re-surface once", async () => {
+    fs.writeFileSync(
+      suppressedFile,
+      JSON.stringify({
+        // Pre-fingerprint entry — written by the old indefinite-mute code.
+        "/vault/legacy.md": { reason: "reviewed", suppressedAt: "x" },
+      }),
+    );
+    writeRun({
+      id: "fp-3",
+      reviewRequired: true,
+      artifacts: [
+        {
+          type: "task-note",
+          label: "Legacy",
+          path: "/vault/legacy.md",
+          decision: {
+            kind: "status-divergence",
+            jiraKey: "X",
+            jiraStatus: "Done",
+            localStatus: "open",
+          },
+        },
+      ],
+    });
+    const res = await request(app).get("/api/runs/fp-3").expect(200);
+    expect(res.body.artifacts).toHaveLength(1); // legacy mute no longer hides it
+  });
+
+  it("stores the decision fingerprint when an artifact is reviewed", async () => {
+    writeRun({
+      id: "fp-4",
+      reviewRequired: true,
+      artifacts: [
+        {
+          type: "task-note",
+          label: "N",
+          path: "/vault/n.md",
+          decision: {
+            kind: "status-divergence",
+            jiraKey: "N",
+            jiraStatus: "Done",
+            localStatus: "open",
+          },
+        },
+      ],
+    });
+    await request(app)
+      .post("/api/runs/fp-4/artifacts/reviewed")
+      .send({ path: "/vault/n.md" })
+      .expect(200);
+    const reg = JSON.parse(fs.readFileSync(suppressedFile, "utf-8"));
+    expect(reg["/vault/n.md"].fingerprint).toBe("status-divergence|Done|open");
+  });
+
+  it("still suppresses archived items by path (archive has no undo)", async () => {
+    fs.writeFileSync(
+      suppressedFile,
+      JSON.stringify({
+        "/vault/arch.md": { reason: "archived", suppressedAt: "x" },
+      }),
+    );
+    writeRun({
+      id: "fp-5",
+      reviewRequired: true,
+      artifacts: [
+        { type: "task-note", label: "Arch", path: "/vault/arch.md" },
+      ],
+    });
+    const res = await request(app).get("/api/runs/fp-5").expect(200);
+    expect(res.body.artifacts).toEqual([]); // archived → muted regardless of fingerprint
   });
 });
 
