@@ -85,11 +85,24 @@ export function ArtifactReview({
     );
   }
 
-  if (artifact.type === "markdown") {
+  if (artifact.type === "markdown" || artifact.type === "note") {
     // Key on path so the component remounts with fresh state when the
     // artifact changes — avoids needing a synchronous setLoading(true) in
     // MarkdownArtifact's effect body.
-    return <MarkdownArtifact key={artifact.path} artifact={artifact} />;
+    //
+    // `note` (the observations sink) renders the same inline markdown, but also
+    // gets a Mark-reviewed control via runId/onReviewedChange so the run can
+    // clear the Needs Review queue. Plain `markdown` stays read-only (no runId).
+    return (
+      <MarkdownArtifact
+        key={artifact.path}
+        artifact={artifact}
+        runId={artifact.type === "note" ? runId : undefined}
+        onReviewedChange={
+          artifact.type === "note" ? onReviewedChange : undefined
+        }
+      />
+    );
   }
 
   const href =
@@ -118,13 +131,61 @@ export function ArtifactReview({
 
 interface MarkdownArtifactProps {
   artifact: Artifact;
+  // When set (observation `note` artifacts), a Mark-reviewed control is shown
+  // so the run can clear the Needs Review queue. Omitted for plain read-only
+  // `markdown` artifacts.
+  runId?: string;
+  onReviewedChange?: (artifact: Artifact) => void;
 }
 
-function MarkdownArtifact({ artifact }: MarkdownArtifactProps) {
+function MarkdownArtifact({
+  artifact,
+  runId,
+  onReviewedChange,
+}: MarkdownArtifactProps) {
   const [detail, setDetail] = useState<ArtifactDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [missing, setMissing] = useState(false);
+  const [reviewedAt, setReviewedAt] = useState<string | undefined>(
+    artifact.reviewedAt,
+  );
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+
+  const handleMarkReviewed = async () => {
+    if (!runId) return;
+    setReviewBusy(true);
+    setReviewError(null);
+    try {
+      const result = await markArtifactReviewed(runId, artifact.path);
+      const ts = result.artifact.reviewedAt;
+      setReviewedAt(ts);
+      onReviewedChange?.({ ...artifact, reviewedAt: ts });
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
+  const handleUnmarkReviewed = async () => {
+    if (!runId) return;
+    setReviewBusy(true);
+    setReviewError(null);
+    try {
+      await unmarkArtifactReviewed(runId, artifact.path);
+      setReviewedAt(undefined);
+      onReviewedChange?.({ ...artifact, reviewedAt: undefined });
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
+  // Only `note` artifacts pass a runId, so this gates the whole review control.
+  const reviewable = !!runId;
 
   useEffect(() => {
     let cancelled = false;
@@ -162,6 +223,25 @@ function MarkdownArtifact({ artifact }: MarkdownArtifactProps) {
           <span className="font-medium text-sm truncate flex-1">
             {artifact.label}
           </span>
+          {/* Reviewing doesn't touch the file, so a moved/deleted note can
+              still be cleared from the queue. */}
+          {reviewable && !reviewedAt && (
+            <button
+              onClick={handleMarkReviewed}
+              disabled={reviewBusy}
+              className="text-xs flex items-center gap-1.5 px-3 py-1 rounded-md border hover:bg-muted disabled:opacity-50"
+              title="Mark reviewed and dismiss from the queue"
+            >
+              <CheckCircle2 className="h-3 w-3" />
+              Mark reviewed
+            </button>
+          )}
+          {reviewable && reviewedAt && (
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <CheckCircle2 className="h-3 w-3 text-green-600" />
+              reviewed {timeAgo(reviewedAt)}
+            </span>
+          )}
         </div>
         <p className="text-xs text-muted-foreground">
           File no longer at the recorded path (moved, renamed, or deleted).
@@ -169,6 +249,9 @@ function MarkdownArtifact({ artifact }: MarkdownArtifactProps) {
         <p className="text-xs font-mono text-muted-foreground break-all opacity-70">
           {artifact.path}
         </p>
+        {reviewError && (
+          <div className="text-xs text-destructive">{reviewError}</div>
+        )}
       </Card>
     );
   }
@@ -180,6 +263,32 @@ function MarkdownArtifact({ artifact }: MarkdownArtifactProps) {
         <span className="font-medium text-sm truncate flex-1">
           {artifact.label}
         </span>
+        {reviewable &&
+          (reviewedAt ? (
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <CheckCircle2 className="h-3 w-3 text-green-600" />
+              reviewed {timeAgo(reviewedAt)}
+              <button
+                onClick={handleUnmarkReviewed}
+                disabled={reviewBusy}
+                className="flex items-center gap-1 hover:text-foreground disabled:opacity-50"
+                title="Undo — return to the review queue"
+              >
+                <RotateCcw className="h-3 w-3" />
+                undo
+              </button>
+            </span>
+          ) : (
+            <button
+              onClick={handleMarkReviewed}
+              disabled={reviewBusy}
+              className="text-xs flex items-center gap-1.5 px-3 py-1 rounded-md border hover:bg-muted disabled:opacity-50"
+              title="Mark reviewed and dismiss from the queue"
+            >
+              <CheckCircle2 className="h-3 w-3" />
+              Mark reviewed
+            </button>
+          ))}
         <a
           href={`file://${encodeURI(artifact.path)}`}
           target="_blank"
@@ -192,6 +301,9 @@ function MarkdownArtifact({ artifact }: MarkdownArtifactProps) {
       </div>
 
       {error && <div className="text-xs text-destructive">{error}</div>}
+      {reviewError && (
+        <div className="text-xs text-destructive">{reviewError}</div>
+      )}
 
       {loading ? (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">

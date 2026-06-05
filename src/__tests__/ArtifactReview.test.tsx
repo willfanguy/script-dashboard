@@ -302,13 +302,27 @@ describe("ArtifactReview — decision actions", () => {
 
   it("snooze button POSTs the snooze endpoint with a YYYY-MM-DD untilDate", async () => {
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(mockFetchResponse(SAMPLE_DETAIL));
-    fetchMock.mockResolvedValueOnce(mockFetchResponse({ mappings: {} }));
-    fetchMock.mockResolvedValueOnce(mockFetchResponse(SAMPLE_DETAIL));
-    // After snooze, the component calls performArchive → archiveArtifact
-    fetchMock.mockResolvedValueOnce(
-      mockFetchResponse({ originalPath: "x", newPath: "y" }),
-    );
+    // URL-aware: a snooze click fires snooze→archive on top of the racing
+    // mount fetches (detail + status-mapping). A positional queue misaligns
+    // when status-mapping is cache-skipped across tests; route by endpoint.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/artifacts?")) {
+        return Promise.resolve(mockFetchResponse(SAMPLE_DETAIL));
+      }
+      if (url.includes("/api/jira/status-mapping")) {
+        return Promise.resolve(mockFetchResponse({ mappings: {} }));
+      }
+      if (url.includes("/api/artifacts/snooze")) {
+        return Promise.resolve(mockFetchResponse({ ok: true }));
+      }
+      if (url.includes("/api/artifacts/archive")) {
+        return Promise.resolve(
+          mockFetchResponse({ originalPath: "x", newPath: "y" }),
+        );
+      }
+      return Promise.resolve(mockFetchResponse({}, false, 404));
+    });
 
     render(
       <ArtifactReview
@@ -322,32 +336,43 @@ describe("ArtifactReview — decision actions", () => {
     const snooze = await screen.findByRole("button", { name: /Snooze 30 days/i });
     fireEvent.click(snooze);
 
+    let snoozeCall: unknown[] | undefined;
     await waitFor(() => {
-      // 1: initial detail. 2: status mapping. 3: snooze. 4: archive.
-      expect(fetchMock).toHaveBeenCalledTimes(4);
+      snoozeCall = fetchMock.mock.calls.find((c) =>
+        String(c[0]).includes("/api/artifacts/snooze"),
+      );
+      expect(snoozeCall).toBeTruthy();
     });
-    // The snooze call is the 3rd. Index it explicitly so reorderings surface.
-    const snoozeCall = fetchMock.mock.calls.find((c) =>
-      String(c[0]).includes("/api/artifacts/snooze"),
-    );
-    expect(snoozeCall).toBeTruthy();
-    const body = JSON.parse(String(snoozeCall?.[1]?.body));
+    const body = JSON.parse(String((snoozeCall?.[1] as RequestInit)?.body));
     expect(body.untilDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
   it("Push to JIRA first fetches transitions then renders them in a dropdown", async () => {
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(mockFetchResponse(SAMPLE_DETAIL));
-    fetchMock.mockResolvedValueOnce(mockFetchResponse({ mappings: {} }));
-    fetchMock.mockResolvedValueOnce(
-      mockFetchResponse({
-        key: "SM-685",
-        transitions: [
-          { id: "21", name: "Start", toStatus: "In Progress" },
-          { id: "31", name: "Done", toStatus: "Done" },
-        ],
-      }),
-    );
+    // URL-aware, not positional: the detail and status-mapping fetches fire
+    // from independent mount effects and race, so an ordered mockResolvedValueOnce
+    // queue is non-deterministic. Route by endpoint instead.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/artifacts?")) {
+        return Promise.resolve(mockFetchResponse(SAMPLE_DETAIL));
+      }
+      if (url.includes("/api/jira/status-mapping")) {
+        return Promise.resolve(mockFetchResponse({ mappings: {} }));
+      }
+      if (url.includes("/api/jira/SM-685/transitions")) {
+        return Promise.resolve(
+          mockFetchResponse({
+            key: "SM-685",
+            transitions: [
+              { id: "21", name: "Start", toStatus: "In Progress" },
+              { id: "31", name: "Done", toStatus: "Done" },
+            ],
+          }),
+        );
+      }
+      return Promise.resolve(mockFetchResponse({}, false, 404));
+    });
 
     render(
       <ArtifactReview
@@ -364,13 +389,11 @@ describe("ArtifactReview — decision actions", () => {
     fireEvent.click(push);
 
     await waitFor(() => {
-      // 1: detail. 2: mapping. 3: transitions list.
-      expect(fetchMock).toHaveBeenCalledTimes(3);
+      const transitionsCall = fetchMock.mock.calls.find((c) =>
+        String(c[0]).includes("/api/jira/SM-685/transitions"),
+      );
+      expect(transitionsCall).toBeTruthy();
     });
-    const transitionsCall = fetchMock.mock.calls.find((c) =>
-      String(c[0]).includes("/api/jira/SM-685/transitions"),
-    );
-    expect(transitionsCall).toBeTruthy();
 
     // Dropdown options now visible
     expect(await screen.findByText(/Transition to/)).toBeTruthy();
@@ -380,18 +403,35 @@ describe("ArtifactReview — decision actions", () => {
 
   it("selecting a transition POSTs to /transition and clears the card", async () => {
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(mockFetchResponse(SAMPLE_DETAIL));
-    fetchMock.mockResolvedValueOnce(mockFetchResponse({ mappings: {} }));
-    fetchMock.mockResolvedValueOnce(
-      mockFetchResponse({
-        transitions: [
-          { id: "21", name: "Start", toStatus: "In Progress" },
-        ],
-      }),
-    );
-    fetchMock.mockResolvedValueOnce(mockFetchResponse({ key: "SM-685" }));
-    fetchMock.mockResolvedValueOnce(
-      mockFetchResponse({ originalPath: "x", newPath: "y" }),
+    // URL-aware routing (see note above). `/transitions` is checked before the
+    // `/transition` POST since the former is a superstring of the latter.
+    fetchMock.mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method;
+        if (url.startsWith("/api/artifacts?")) {
+          return Promise.resolve(mockFetchResponse(SAMPLE_DETAIL));
+        }
+        if (url.includes("/api/jira/status-mapping")) {
+          return Promise.resolve(mockFetchResponse({ mappings: {} }));
+        }
+        if (url.includes("/api/jira/SM-685/transitions")) {
+          return Promise.resolve(
+            mockFetchResponse({
+              transitions: [{ id: "21", name: "Start", toStatus: "In Progress" }],
+            }),
+          );
+        }
+        if (url.includes("/api/jira/SM-685/transition") && method === "POST") {
+          return Promise.resolve(mockFetchResponse({ key: "SM-685" }));
+        }
+        if (url.includes("/api/artifacts/archive")) {
+          return Promise.resolve(
+            mockFetchResponse({ originalPath: "x", newPath: "y" }),
+          );
+        }
+        return Promise.resolve(mockFetchResponse({}, false, 404));
+      },
     );
 
     render(
@@ -412,33 +452,46 @@ describe("ArtifactReview — decision actions", () => {
     })) as HTMLSelectElement;
     fireEvent.change(select, { target: { value: "21" } });
 
+    let transitionPost: unknown[] | undefined;
     await waitFor(() => {
-      // 1: detail. 2: mapping. 3: transitions. 4: transition POST. 5: archive.
-      expect(fetchMock).toHaveBeenCalledTimes(5);
+      transitionPost = fetchMock.mock.calls.find(
+        (c) =>
+          String(c[0]).includes("/api/jira/SM-685/transition") &&
+          !String(c[0]).includes("/transitions"),
+      );
+      expect(transitionPost).toBeTruthy();
     });
-    const transitionPost = fetchMock.mock.calls.find(
-      (c) =>
-        String(c[0]).includes("/api/jira/SM-685/transition") &&
-        !String(c[0]).includes("/transitions"),
-    );
-    expect(transitionPost).toBeTruthy();
-    expect(transitionPost?.[1]?.method).toBe("POST");
-    expect(JSON.parse(String(transitionPost?.[1]?.body))).toEqual({
+    expect((transitionPost?.[1] as RequestInit)?.method).toBe("POST");
+    expect(
+      JSON.parse(String((transitionPost?.[1] as RequestInit)?.body)),
+    ).toEqual({
       transitionId: "21",
     });
   });
 
   it("surfaces an error if the JIRA transitions fetch fails (e.g., 503 no JIRA configured)", async () => {
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(mockFetchResponse(SAMPLE_DETAIL));
-    fetchMock.mockResolvedValueOnce(mockFetchResponse({ mappings: {} }));
-    fetchMock.mockResolvedValueOnce(
-      mockFetchResponse(
-        { error: "JIRA integration is not configured on this server." },
-        false,
-        503,
-      ),
-    );
+    // URL-aware: only the transitions endpoint fails. A positional queue would
+    // hand the 503 to the wrong fetch when mount fetches race/cache-skip.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/artifacts?")) {
+        return Promise.resolve(mockFetchResponse(SAMPLE_DETAIL));
+      }
+      if (url.includes("/api/jira/status-mapping")) {
+        return Promise.resolve(mockFetchResponse({ mappings: {} }));
+      }
+      if (url.includes("/api/jira/SM-609/transitions")) {
+        return Promise.resolve(
+          mockFetchResponse(
+            { error: "JIRA integration is not configured on this server." },
+            false,
+            503,
+          ),
+        );
+      }
+      return Promise.resolve(mockFetchResponse({}, false, 404));
+    });
 
     render(
       <ArtifactReview
@@ -621,5 +674,133 @@ describe("ArtifactReview — non-task-note artifacts", () => {
     const link = screen.getByRole("link", { name: /Open/i }) as HTMLAnchorElement;
     expect(link.href).toBe(URL_ARTIFACT.path);
     expect(screen.getByText(URL_ARTIFACT.label)).toBeTruthy();
+  });
+});
+
+describe("ArtifactReview — note (observations)", () => {
+  const NOTE_ARTIFACT: Artifact = {
+    type: "note",
+    label: "⚠️ 2 run observations",
+    path: "/Users/will/.script-runs/observations/slack-saved-sync-x.md",
+  };
+  const NOTE_BODY =
+    "# Run observations — slack-saved-sync\n\n" +
+    "- [ ] Reaction-removal returned no_reaction\n" +
+    "- [ ] Two JIRA keys, two existing Task Notes\n";
+
+  it("renders the observations inline (not a dead file:// link) with a Mark-reviewed control", async () => {
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/artifacts?")) {
+        return Promise.resolve(
+          mockFetchResponse({
+            path: NOTE_ARTIFACT.path,
+            frontmatter: {},
+            body: NOTE_BODY,
+          }),
+        );
+      }
+      return Promise.resolve(mockFetchResponse({}, false, 404));
+    });
+
+    render(<ArtifactReview artifact={NOTE_ARTIFACT} runId="run-1" />);
+
+    // Content is fetched and rendered inline — the whole point of the fix.
+    expect(
+      await screen.findByText(/Reaction-removal returned no_reaction/i),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/Two JIRA keys, two existing Task Notes/i),
+    ).toBeTruthy();
+    // And it's clearable.
+    expect(
+      screen.getByRole("button", { name: /Mark reviewed/i }),
+    ).toBeTruthy();
+  });
+
+  it("marks the artifact reviewed (POST + onReviewedChange) so the run can clear", async () => {
+    const reviewedTs = "2026-06-05T17:00:00.000Z";
+    vi.mocked(fetch).mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith("/api/artifacts?")) {
+          return Promise.resolve(
+            mockFetchResponse({
+              path: NOTE_ARTIFACT.path,
+              frontmatter: {},
+              body: NOTE_BODY,
+            }),
+          );
+        }
+        if (url.includes("/artifacts/reviewed") && init?.method === "POST") {
+          return Promise.resolve(
+            mockFetchResponse({
+              artifact: { ...NOTE_ARTIFACT, reviewedAt: reviewedTs },
+              run: {},
+            }),
+          );
+        }
+        return Promise.resolve(mockFetchResponse({}, false, 404));
+      },
+    );
+
+    const onReviewedChange = vi.fn();
+    render(
+      <ArtifactReview
+        artifact={NOTE_ARTIFACT}
+        runId="run-1"
+        onReviewedChange={onReviewedChange}
+      />,
+    );
+
+    const btn = await screen.findByRole("button", { name: /Mark reviewed/i });
+    fireEvent.click(btn);
+
+    await waitFor(() =>
+      expect(onReviewedChange).toHaveBeenCalledWith(
+        expect.objectContaining({ reviewedAt: reviewedTs }),
+      ),
+    );
+    // The POST targeted the per-artifact reviewed endpoint for this run.
+    const postCall = vi
+      .mocked(fetch)
+      .mock.calls.find(
+        ([u, i]) =>
+          String(u).includes("/runs/run-1/artifacts/reviewed") &&
+          (i as RequestInit)?.method === "POST",
+      );
+    expect(postCall).toBeTruthy();
+    // UI flips to the reviewed state.
+    expect(await screen.findByText(/reviewed/i)).toBeTruthy();
+  });
+
+  it("keeps plain markdown artifacts read-only (no Mark-reviewed control)", async () => {
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/artifacts?")) {
+        return Promise.resolve(
+          mockFetchResponse({
+            path: "/vault/Resources/some-doc.md",
+            frontmatter: {},
+            body: "# Just a doc\n\nNothing to review here.\n",
+          }),
+        );
+      }
+      return Promise.resolve(mockFetchResponse({}, false, 404));
+    });
+
+    render(
+      <ArtifactReview
+        artifact={{
+          type: "markdown",
+          label: "Some doc",
+          path: "/vault/Resources/some-doc.md",
+        }}
+        runId="run-1"
+      />,
+    );
+
+    expect(await screen.findByText(/Just a doc/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Mark reviewed/i })).toBeNull();
   });
 });

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useRuns } from "@/hooks/use-runs";
+import { useFocusRun } from "@/hooks/use-focus-run";
 import { RunList, type RunListView } from "@/components/RunList";
 import { Badge } from "@/components/ui/badge";
 import { RefreshCw, LayoutList, Clock, Inbox } from "lucide-react";
@@ -15,6 +16,7 @@ function loadView(): RunListView {
 function App() {
   const { runs, registry, loading, error, connected, refresh, fetchRunDetail } =
     useRuns();
+  const focusRunId = useFocusRun();
   const [view, setView] = useState<RunListView>(loadView);
 
   useEffect(() => {
@@ -141,6 +143,7 @@ function App() {
             registry={registry}
             onExpand={fetchRunDetail}
             view={view}
+            focusRunId={focusRunId}
           />
         )}
       </main>

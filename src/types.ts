@@ -1,4 +1,8 @@
-export type ArtifactType = "task-note" | "markdown" | "file" | "url";
+// `note` is the observations-sink type agents emit via `--artifact note ...`:
+// a markdown checklist of things the run noticed but didn't act on. Rendered
+// inline (like `markdown`) with a Mark-reviewed control so the run can clear
+// the Needs Review queue.
+export type ArtifactType = "task-note" | "markdown" | "file" | "url" | "note";
 
 // Reconciliation context attached by todo-sync (and any future agent that
 // produces decisions vs. just new artifacts). Drives the conditional action

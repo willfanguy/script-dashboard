@@ -26,6 +26,7 @@ import { archiveArtifact } from "@/lib/artifacts-api";
 import { CategoryGlyph } from "@/utils/categoryIcons";
 import { splitWorkspace, splitSource } from "@/utils/parseWorkspace";
 import { workspaceColor } from "@/utils/workspaceColor";
+import { cn } from "@/lib/utils";
 
 interface RunCardProps {
   run: RunRecord;
@@ -36,6 +37,10 @@ interface RunCardProps {
   // date via a day header above the row (chronological view, cluster
   // expansion). Defaults to false for views where each row needs full date.
   compactTime?: boolean;
+  // When true, this is the deep-link target (`?run=`): on mount the card
+  // expands, scrolls itself into view, and flashes a highlight ring so the
+  // user lands on exactly the run their notification pointed at.
+  focused?: boolean;
 }
 
 function StatusIcon({ status }: { status: RunRecord["status"] }) {
@@ -53,14 +58,19 @@ function StatusIcon({ status }: { status: RunRecord["status"] }) {
 
 const RUNNING_TICK_MS = 1_000;
 const RUNNING_OUTPUT_POLL_MS = 3_000;
+// How long the deep-link highlight ring stays lit before fading.
+const FOCUS_HIGHLIGHT_MS = 2_500;
 
 export function RunCard({
   run,
   scriptInfo,
   onExpand,
   compactTime = false,
+  focused = false,
 }: RunCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const [highlight, setHighlight] = useState(false);
   const [output, setOutput] = useState<string | null>(null);
   const [loadingOutput, setLoadingOutput] = useState(false);
   // Monotonic ticker so "elapsed" and "last activity" re-render smoothly while
@@ -105,6 +115,22 @@ export function RunCard({
     }
     setExpanded(next);
   };
+
+  // Deep-link focus: when this card is the `?run=` target, expand it (which
+  // also loads its output + review pane via handleToggle), pull it into view,
+  // and flash a highlight ring that fades after a beat. Keyed on `focused`
+  // alone so it fires once when the card becomes the target — not on every
+  // output refetch. scrollIntoView is optional-chained so the non-DOM test
+  // env (and any browser lacking it) degrades to expand+highlight only.
+  useEffect(() => {
+    if (!focused) return;
+    void handleToggle(true);
+    rowRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    setHighlight(true);
+    const t = setTimeout(() => setHighlight(false), FOCUS_HIGHLIGHT_MS);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focused]);
 
   // Live tick while running — drives the elapsed / last-activity readouts.
   useEffect(() => {
@@ -211,16 +237,19 @@ export function RunCard({
   };
 
   return (
+    <div ref={rowRef}>
     <CollapsibleRow
       open={expanded}
       onOpenChange={handleToggle}
-      cardClassName={
+      cardClassName={cn(
         showStallBorder
           ? "border-l-4 border-l-red-500"
           : needsReview
             ? "border-l-4 border-l-amber-500"
-            : undefined
-      }
+            : undefined,
+        highlight &&
+          "ring-2 ring-primary ring-offset-2 ring-offset-background transition-shadow duration-500",
+      )}
       triggerClassName="px-4 py-3 hover:bg-muted/50"
       leading={
         <>
@@ -509,5 +538,6 @@ export function RunCard({
             )}
           </div>
     </CollapsibleRow>
+    </div>
   );
 }

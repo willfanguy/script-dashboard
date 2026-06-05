@@ -12,16 +12,25 @@ interface RunClusterCardProps {
   cluster: RunCluster;
   scriptMap: Map<string, ScriptInfo>;
   onExpand: (id: string) => Promise<RunRecord | null>;
+  /** Deep-link target; if a member matches, the cluster opens by default so the
+   *  inner card can focus itself. */
+  focusRunId?: string | null;
 }
 
 export function RunClusterCard({
   cluster,
   scriptMap,
   onExpand,
+  focusRunId,
 }: RunClusterCardProps) {
-  const [expanded, setExpanded] = useState(false);
-
   const { runs, totalDuration, failedCount } = cluster;
+  // If the deep-linked run lives inside this cluster, open the cluster on mount
+  // — otherwise the inner RunCard never renders and can't scroll/focus itself.
+  // focusRunId is known before members render (read from the URL on App mount),
+  // so the initializer sees the right value.
+  const containsFocus = !!focusRunId && runs.some((r) => r.id === focusRunId);
+  const [expanded, setExpanded] = useState(containsFocus);
+
   // Members are newest-first; earliest = last, latest = first.
   const latest = runs[0];
   const earliest = runs[runs.length - 1];
@@ -69,6 +78,7 @@ export function RunClusterCard({
             run={run}
             scriptInfo={scriptMap.get(run.script)}
             onExpand={onExpand}
+            focused={run.id === focusRunId}
             compactTime
           />
         ))}

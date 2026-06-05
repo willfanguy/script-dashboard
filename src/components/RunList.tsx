@@ -32,6 +32,10 @@ interface RunListProps {
   registry: ScriptRegistry | null;
   onExpand: (id: string) => Promise<RunRecord | null>;
   view: RunListView;
+  /** Deep-link target from `?run=`; its card is expanded, scrolled to, and
+   *  flashed. We also reveal whatever container hides it (collapsed category,
+   *  filtered-out chrono category). Null when no deep link is present. */
+  focusRunId?: string | null;
 }
 
 const COLLAPSED_STORAGE_KEY = "script-dashboard:collapsed-categories";
@@ -57,16 +61,47 @@ function loadChronoFilter(): Set<string> {
   return loadStringSet(CHRONO_FILTER_STORAGE_KEY);
 }
 
-export function RunList({ runs, registry, onExpand, view }: RunListProps) {
+// The category that holds the deep-link target, or null. App only mounts
+// RunList once runs have loaded, so this resolves at first render — letting us
+// reveal the category in the state initializers below rather than via an
+// effect (which would fight the persisted collapse/filter prefs and trip the
+// "no setState in effect" rule).
+function focusCategoryOf(
+  runs: RunRecord[],
+  focusRunId: string | null | undefined,
+): string | null {
+  if (!focusRunId) return null;
+  return runs.find((r) => r.id === focusRunId)?.category ?? null;
+}
+
+export function RunList({
+  runs,
+  registry,
+  onExpand,
+  view,
+  focusRunId,
+}: RunListProps) {
   const scriptMap = useMemo(
     () => new Map(registry?.scripts.map((s) => [s.id, s]) || []),
     [registry],
   );
 
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
-  const [chronoDisabled, setChronoDisabled] = useState<Set<string>>(() =>
-    loadChronoFilter(),
-  );
+  // Reveal the deep-linked run's category at mount: the run may sit inside a
+  // collapsed category (grouped view) or one filtered out of the chronological
+  // view. We strip it from the initial collapsed / disabled sets so the target
+  // is visible without forcing a view switch.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    const s = loadCollapsed();
+    const fc = focusCategoryOf(runs, focusRunId);
+    if (fc) s.delete(fc);
+    return s;
+  });
+  const [chronoDisabled, setChronoDisabled] = useState<Set<string>>(() => {
+    const s = loadChronoFilter();
+    const fc = focusCategoryOf(runs, focusRunId);
+    if (fc) s.delete(fc);
+    return s;
+  });
 
   useEffect(() => {
     try {
@@ -187,6 +222,7 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
                   cluster={entry.cluster}
                   scriptMap={scriptMap}
                   onExpand={onExpand}
+                  focusRunId={focusRunId}
                 />
               ) : (
                 <RunCard
@@ -194,6 +230,7 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
                   run={entry.run}
                   scriptInfo={scriptMap.get(entry.run.script)}
                   onExpand={onExpand}
+                  focused={entry.run.id === focusRunId}
                   compactTime
                 />
               );
@@ -230,6 +267,7 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
             run={run}
             scriptInfo={scriptMap.get(run.script)}
             onExpand={onExpand}
+            focused={run.id === focusRunId}
           />
         ))}
       </div>
@@ -272,6 +310,7 @@ export function RunList({ runs, registry, onExpand, view }: RunListProps) {
                     run={run}
                     scriptInfo={scriptMap.get(run.script)}
                     onExpand={onExpand}
+                    focused={run.id === focusRunId}
                   />
                 ))}
               </div>

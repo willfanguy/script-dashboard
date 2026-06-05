@@ -123,8 +123,10 @@ export async function fetchJiraTransitions(
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `HTTP ${res.status}`);
   }
-  const data = (await res.json()) as { transitions: JiraTransition[] };
-  return data.transitions;
+  const data = (await res.json()) as { transitions?: JiraTransition[] };
+  // Never return undefined: a malformed/empty body should degrade to "no
+  // transitions available", not throw `transitions.length` in PushToJiraButton.
+  return data.transitions ?? [];
 }
 
 export async function transitionJiraIssue(
